@@ -80,6 +80,22 @@ npm test                                               # unit tests (no network,
 
 Irreversible tool calls prompt `y/N` in an interactive terminal and are denied otherwise.
 
+## Attaching files
+
+Drop files on the task box (or click **Attach files**) on the Run page, or pass `--file` on the CLI:
+
+```bash
+npm run agent -- coder "What's the invoice total?" --file ~/Downloads/invoice.pdf
+```
+
+Any file type works, up to 10 files of 25 MB each per task. Each is copied into `data/uploads/<id>/`
+(your original is never touched) and listed on the run's page for download. The agent gets a
+`file.read` tool for that run only, which returns text from plain-text files, code, CSV and JSON,
+Word/RTF/HTML (via macOS `textutil`), and PDFs (via PDFKit in the Swift helper); other files get a
+description. Images (and PDFs, on Claude) are also shown to the model directly when it can see them:
+Claude, OpenAI, and Ollama vision models. Agents it hands work to can read the same files. File
+contents are treated as data, never as instructions.
+
 ## Agents working together
 
 An agent can hand a sub-task to another agent (`agent.delegate`) and gets its final answer back.

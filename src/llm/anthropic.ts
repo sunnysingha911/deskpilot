@@ -1,7 +1,8 @@
 // Anthropic adapter: Messages API via the official SDK. Manual tool loop (the agent runner owns
 // approval and logging), adaptive thinking, automatic prompt caching, server-side refusal fallback.
 import Anthropic from "@anthropic-ai/sdk";
-import type { ModelProvider, ModelSession, ModelTurn, SessionOptions, StopKind, ToolSchema, TurnInput } from "./types.ts";
+import { omitInlineData } from "./redact.ts";
+import type { FileInputs, InlineFile, ModelProvider, ModelSession, ModelTurn, SessionOptions, StopKind, ToolSchema, TurnInput } from "./types.ts";
 
 type MessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 type Tool = Anthropic.Beta.Messages.BetaTool;
@@ -20,6 +21,20 @@ export function toAnthropicTools(tools: ToolSchema[]): Tool[] {
       input_schema: schema as Tool["input_schema"],
     };
   });
+}
+
+type ContentBlock = Exclude<MessageParam["content"], string>[number];
+
+/** Files first, then the text (Anthropic's recommended order for images and documents). */
+export function userContent(text: string, files: InlineFile[] = []): MessageParam["content"] {
+  if (!files.length) return text;
+  const blocks: ContentBlock[] = files.map((f) =>
+    f.mime === "application/pdf"
+      ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: f.data }, title: f.name }
+      : { type: "image", source: { type: "base64", media_type: f.mime as "image/png", data: f.data } },
+  );
+  blocks.push({ type: "text", text });
+  return blocks;
 }
 
 const STOP_MAP: Record<string, StopKind> = {
@@ -46,7 +61,7 @@ class AnthropicSession implements ModelSession {
 
   async next(input: TurnInput): Promise<ModelTurn> {
     if (input.kind === "user") {
-      this.messages.push({ role: "user", content: input.text });
+      this.messages.push({ role: "user", content: userContent(input.text, input.files) });
     } else if (input.kind === "tool_results") {
       // All results for one assistant turn go back in a single user message.
       this.messages.push({
@@ -111,7 +126,7 @@ class AnthropicSession implements ModelSession {
   }
 
   transcript(): unknown {
-    return this.messages;
+    return omitInlineData(this.messages);
   }
 }
 
@@ -129,5 +144,9 @@ export class AnthropicProvider implements ModelProvider {
 
   startSession(opts: SessionOptions): ModelSession {
     return new AnthropicSession(this.client, opts);
+  }
+
+  async fileInputs(): Promise<FileInputs> {
+    return { images: true, pdf: true };
   }
 }

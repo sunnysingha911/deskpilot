@@ -111,6 +111,8 @@ export class ActionLogger {
     const cols = new Set((this.db.prepare(`PRAGMA table_info(runs)`).all() as Array<{ name: string }>).map((c) => c.name));
     if (!cols.has("parent_run_id")) this.db.exec(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`);
     if (!cols.has("relation")) this.db.exec(`ALTER TABLE runs ADD COLUMN relation TEXT`);
+    // Added with file attachments: the id of the run's upload folder (data/uploads/<id>).
+    if (!cols.has("attachments")) this.db.exec(`ALTER TABLE runs ADD COLUMN attachments TEXT`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS runs_parent ON runs(parent_run_id)`);
     this.insertStmt = this.db.prepare(`
       INSERT INTO actions (os, session_id, caller, tool, risk, status, approved_by, input_json, output_json, error, duration_ms)
@@ -135,10 +137,20 @@ export class ActionLogger {
     return Number(res.lastInsertRowid);
   }
 
-  startRun(r: { id: string; agent: string; provider: string; model: string; task: string; parentRunId?: string | undefined; relation?: RunRelation | undefined }): void {
+  startRun(r: {
+    id: string;
+    agent: string;
+    provider: string;
+    model: string;
+    task: string;
+    parentRunId?: string | undefined;
+    relation?: RunRelation | undefined;
+    /** Upload folder id of the files attached to this run (shared with the runs it delegates to). */
+    attachments?: string | undefined;
+  }): void {
     this.db
-      .prepare(`INSERT INTO runs (id, os, agent, provider, model, task, parent_run_id, relation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(r.id, process.platform, r.agent, r.provider, r.model, r.task, r.parentRunId ?? null, r.parentRunId ? (r.relation ?? "delegate") : null);
+      .prepare(`INSERT INTO runs (id, os, agent, provider, model, task, parent_run_id, relation, attachments) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(r.id, process.platform, r.agent, r.provider, r.model, r.task, r.parentRunId ?? null, r.parentRunId ? (r.relation ?? "delegate") : null, r.attachments ?? null);
   }
 
   finishRun(id: string, f: RunSummary & { transcript: unknown }): void {

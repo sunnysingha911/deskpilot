@@ -4,12 +4,13 @@
 // requests must target 127.0.0.1/localhost on our port (blocks DNS rebinding), cross-origin requests
 // are refused, and the page is served under a strict Content-Security-Policy.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join } from "node:path";
 import { AGENTS_DIR, AgentDefinition, listAgents, loadAgent } from "../agent/definition.ts";
 import { AvatarLook, defaultLook } from "../agent/schema.ts";
+import { addStream, AttachmentError, createSet, MAX_FILE_BYTES, getAttachment, listSet, removeAttachment, setExists, SET_ID_RE } from "../core/attachments.ts";
 import { ActionLogger } from "../core/logger.ts";
 import { DATA_DIR, ROOT } from "../core/paths.ts";
 import { getConnection, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
@@ -57,6 +58,28 @@ async function readJson(req: IncomingMessage): Promise<any> {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     throw new HttpError(400, "body must be JSON");
+  }
+}
+
+const ATTACHMENT_STATUS: Record<AttachmentError["code"], number> = { bad_set: 404, not_found: 404, too_large: 413, too_many: 400, empty: 400 };
+
+/** Run an attachment operation, mapping its errors to HTTP statuses. */
+async function attachmentOp<T>(fn: () => T | Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof AttachmentError) throw new HttpError(ATTACHMENT_STATUS[err.code], err.message);
+    throw err;
+  }
+}
+
+const fileView = (f: { name: string; size: number; mime: string }) => ({ name: f.name, size: f.size, mime: f.mime });
+
+function decodeName(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    throw new HttpError(400, "bad file name");
   }
 }
 
@@ -194,6 +217,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
           model: typeof b.model === "string" && b.model.trim() ? b.model.trim() : undefined,
           with: Array.isArray(b.with) ? b.with.filter((n: unknown): n is string => typeof n === "string" && NAME_RE.test(n)) : undefined,
           fromRun: typeof b.fromRun === "string" && /^[\w-]+$/.test(b.fromRun) ? b.fromRun : undefined,
+          attachments: typeof b.attachments === "string" && SET_ID_RE.test(b.attachments) ? b.attachments : undefined,
         });
       } catch (err) {
         const status = (err as { status?: number }).status ?? 400;
@@ -204,13 +228,31 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       const run = logger.getRun(m[1]!);
       if (!run) throw new HttpError(404, "no such run");
       const { transcript_json: _t, ...rest } = run;
+      const set = typeof run.attachments === "string" && setExists(run.attachments) ? run.attachments : null;
       return {
         run: rest,
+        attachments: set ? listSet(set).files.map(fileView) : [],
         children: logger.childRuns(m[1]!),
         active: runs.isActive(m[1]!),
         pendingApprovals: runs.pendingApprovals(m[1]!),
         actions: logger.queryActions({ sessionId: m[1]!, limit: 1000 }).reverse(),
       };
+    }],
+    // Download an attached file. Always as a download (never rendered here: it's untrusted content).
+    ["GET", /^\/api\/runs\/([\w-]+)\/attachments\/([^/]+)$/, (_req, res, m) => {
+      const run = logger.getRun(m[1]!);
+      if (!run || typeof run.attachments !== "string") throw new HttpError(404, "no such attachment");
+      return attachmentOp(() => {
+        const f = getAttachment(run.attachments as string, decodeName(m[2]!));
+        res.writeHead(200, {
+          ...SECURITY_HEADERS,
+          "content-type": "application/octet-stream",
+          "content-length": String(f.size),
+          "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}`,
+        });
+        createReadStream(f.path).pipe(res);
+        return undefined;
+      });
     }],
     ["POST", /^\/api\/runs\/([\w-]+)\/stop$/, (_req, _res, m) => ({ stopped: runs.stop(m[1]!) })],
     ["POST", /^\/api\/runs\/([\w-]+)\/approvals\/([\w-]+)$/, async (req, _res, m) => {
@@ -245,6 +287,25 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       });
       return undefined;
     }],
+
+    // Attachments: upload one file per request (raw body), into a new set or an existing one.
+    ["POST", /^\/api\/uploads$/, (req, _res, _m, url) =>
+      attachmentOp(async () => {
+        const name = url.searchParams.get("name") ?? "";
+        if (!name.trim()) throw new HttpError(400, "name is required");
+        // Refuse oversized files up front (addStream also stops reading past the limit).
+        if (Number(req.headers["content-length"] ?? 0) > MAX_FILE_BYTES) throw new AttachmentError("too_large", `files can be at most ${MAX_FILE_BYTES / 1024 / 1024} MB`);
+        const given = url.searchParams.get("set");
+        const set = given ?? createSet();
+        if (given && !setExists(given)) throw new HttpError(404, "no such attachment set");
+        const file = await addStream(set, name, req);
+        return { set, file: fileView(file) };
+      })],
+    ["DELETE", /^\/api\/uploads\/([\w-]+)\/([^/]+)$/, (_req, _res, m) =>
+      attachmentOp(() => {
+        removeAttachment(m[1]!, decodeName(m[2]!));
+        return { ok: true };
+      })],
 
     // Desktop avatars: who is on stage and how they feel (snapshot on connect, then every change).
     ["GET", /^\/api\/presence$/, (req, res) => {

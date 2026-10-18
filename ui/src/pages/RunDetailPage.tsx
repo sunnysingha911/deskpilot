@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Forward, Square, Users, Wrench } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
+import { AttachmentList } from "@/components/Attachments";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
 import { StatusBadge } from "@/components/ui/badge";
@@ -78,6 +79,7 @@ export function RunDetailPage() {
             </Link>
           </p>
         )}
+        <AttachmentList runId={r.id} files={d.attachments ?? []} />
         {d.children.length > 0 && (
           <div className="mt-3 border-t pt-3">
             <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">

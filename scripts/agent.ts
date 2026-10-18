@@ -1,10 +1,12 @@
-// Run an agent on a task:  npm run agent -- <agent-name> "<task>"
+// Run an agent on a task:  npm run agent -- <agent-name> "<task>" [--file <path>]...
+// --file attaches a file (copied into data/uploads; the original is only read).
 // Irreversible (and alwaysAsk) tool calls prompt y/N in the terminal; non-interactive runs deny them.
 // "@other-agent" in the task lets the agent hand sub-tasks to that agent (as does canDelegateTo).
 import { join } from "node:path";
 import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../src/agent/definition.ts";
 import { runAgent, type RunEvent } from "../src/agent/runner.ts";
 import { cliApprover } from "../src/core/approval.ts";
+import { addFromPath, createSet, formatSize, listSet, type AttachmentSet } from "../src/core/attachments.ts";
 import { Executor } from "../src/core/executor.ts";
 import { ActionLogger } from "../src/core/logger.ts";
 import { ROOT } from "../src/core/paths.ts";
@@ -17,10 +19,22 @@ try {
   /* no .env: rely on the environment */
 }
 
-const [name, ...rest] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const files: string[] = [];
+const words: string[] = [];
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === "--file") {
+    if (!argv[i + 1]) {
+      console.error("--file needs a path");
+      process.exit(2);
+    }
+    files.push(argv[++i]!);
+  } else words.push(argv[i]!);
+}
+const [name, ...rest] = words;
 const task = rest.join(" ").trim();
 if (!name || !task) {
-  console.error('usage: npm run agent -- <agent-name> "<task>"');
+  console.error('usage: npm run agent -- <agent-name> "<task>" [--file <path>]...');
   process.exit(2);
 }
 
@@ -43,7 +57,7 @@ const print = (e: RunEvent, agent: AgentDefinition | string = def, depth = 0) =>
   const label = typeof agent === "string" ? agent : `${agent.name} · ${agent.model.provider}/${agent.model.id}`;
   switch (e.type) {
     case "start":
-      log(dim(`run ${e.runId} · ${label} · tools: ${e.tools.join(", ")}`));
+      log(dim(`run ${e.runId} · ${label} · tools: ${e.tools.join(", ")}${e.attachments?.length ? ` · files: ${e.attachments.join(", ")}` : ""}`));
       break;
     case "plan":
       log(`📋 plan\n${e.steps.map((s, i) => `   ${{ done: "✓", failed: "✗", skipped: "–", running: "…" }[s.status] ?? "○"} ${i + 1}. ${s.agent ? `[${s.agent}] ` : ""}${s.task}${s.note ? ` — ${s.note}` : ""}`).join("\n")}`);
@@ -79,6 +93,16 @@ const print = (e: RunEvent, agent: AgentDefinition | string = def, depth = 0) =>
   }
 };
 
+let attachments: AttachmentSet | undefined;
+if (files.length) {
+  const id = createSet();
+  for (const f of files) {
+    const a = addFromPath(id, f);
+    console.log(dim(`attached ${a.name} (${formatSize(a.size)})`));
+  }
+  attachments = listSet(id);
+}
+
 if (userAllowed.length) console.log(dim(`may call: ${userAllowed.join(", ")} (mentioned in the task)`));
 const result = await runAgent(def, task, {
   provider: providerFor(def),
@@ -86,6 +110,7 @@ const result = await runAgent(def, task, {
   logger,
   onEvent: (e) => print(e),
   delegation: { loadAgent, providerFor, userAllowed, listAgents: agentNames },
+  attachments: attachments && { set: attachments, showToModel: true },
 });
 logger.close();
 process.exitCode = result.status === "completed" ? 0 : 1;

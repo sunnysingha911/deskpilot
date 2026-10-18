@@ -20,3 +20,9 @@ export function pretty(v: unknown): string {
 }
 
 export const familyOf = (tool: string) => (tool.includes(".") ? tool.split(".")[0]! : tool);
+
+export function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}

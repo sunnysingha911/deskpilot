@@ -77,8 +77,15 @@ export interface ActionRow {
   error: string | null;
   duration_ms: number;
 }
+/** A file attached to a task (stored as a copy in data/uploads). */
+export interface AttachedFile {
+  name: string;
+  size: number;
+  mime: string;
+}
 export interface RunDetail {
   run: RunRow;
+  attachments: AttachedFile[];
   children: ChildRun[];
   active: boolean;
   actions: ActionRow[];

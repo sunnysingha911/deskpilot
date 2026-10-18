@@ -192,7 +192,12 @@ function EventItem({ ev }: { ev: RunEvent }) {
         </Row>
       );
     case "start":
-      return <div className="px-1 text-xs text-muted-foreground">Run {ev.runId} · {ev.tools.length} tools available</div>;
+      return (
+        <div className="px-1 text-xs text-muted-foreground">
+          Run {ev.runId} · {ev.tools.length} tools available
+          {Array.isArray(ev.attachments) && ev.attachments.length > 0 && ` · files: ${ev.attachments.join(", ")}`}
+        </div>
+      );
     case "thinking":
       return (
         <Row tone="muted" icon={<Brain />} className="text-muted-foreground italic">

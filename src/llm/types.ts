@@ -24,8 +24,22 @@ export interface ToolResultInput {
   isError: boolean;
 }
 
+/** A file shown to the model itself (images; PDFs where supported), next to the user's text. */
+export interface InlineFile {
+  name: string;
+  mime: string;
+  /** base64 */
+  data: string;
+}
+
+/** What kinds of files a model can be shown directly. */
+export interface FileInputs {
+  images: boolean;
+  pdf: boolean;
+}
+
 export type TurnInput =
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; files?: InlineFile[] | undefined }
   | { kind: "tool_results"; results: ToolResultInput[] }
   /** Re-send as-is (after a provider-side pause). */
   | { kind: "continue" };
@@ -68,4 +82,6 @@ export interface ModelSession {
 export interface ModelProvider {
   readonly id: string;
   startSession(opts: SessionOptions): ModelSession;
+  /** Which attachments this model can be shown directly. Missing = none (it reads them with file.read). */
+  fileInputs?(model: string): Promise<FileInputs>;
 }

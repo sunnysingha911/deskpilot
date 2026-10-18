@@ -3,6 +3,7 @@ import { Forward, Play, Square, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { parseMentions } from "../../../src/agent/schema.ts";
+import { AttachmentPicker, NO_ATTACHMENTS, type AttachmentState } from "@/components/Attachments";
 import { PageHeader, useMeta } from "@/components/Layout";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
@@ -33,6 +34,7 @@ export function RunPage() {
   const [task, setTask] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
   const [withAgents, setWithAgents] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<AttachmentState>(NO_ATTACHMENTS);
   // "Send to agent…" on a finished run opens this page with ?from=<runId>.
   const [params, setParams] = useSearchParams();
   const fromRun = params.get("from");
@@ -57,10 +59,13 @@ export function RunPage() {
         model: model || undefined,
         with: withAgents.filter((n) => n !== selected!.name && list.some((a) => a.name === n)),
         fromRun: fromRun || undefined,
+        attachments: attachments.files.length ? attachments.set : undefined,
       }),
     onSuccess: ({ runId }) => {
       localStorage.setItem("deskpilot-last-agent", selected!.name);
       setRunId(runId);
+      // The files now belong to that run; the next task starts with a fresh set.
+      setAttachments(NO_ATTACHMENTS);
       qc.invalidateQueries({ queryKey: ["meta"] });
     },
     onError: (e) => toast((e as Error).message, true),
@@ -158,13 +163,15 @@ export function RunPage() {
           </div>
         )}
         <Field label="Task" className="mt-4">
-          <Textarea
-            value={task}
-            onChange={(e) => setTask(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && submit()}
-            placeholder="What should the agent do? Write @agent-name to let it hand part of the work to another agent."
-            className="min-h-20"
-          />
+          <AttachmentPicker value={attachments} onChange={setAttachments} disabled={running || start.isPending} onError={(m) => toast(m, true)}>
+            <Textarea
+              value={task}
+              onChange={(e) => setTask(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && submit()}
+              placeholder="What should the agent do? Write @agent-name to let it hand part of the work to another agent. Drop files here to attach them."
+              className="min-h-20"
+            />
+          </AttachmentPicker>
         </Field>
         {others.length > 0 && selected && (
           <div className="mt-3">

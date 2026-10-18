@@ -3,7 +3,8 @@
 // Usage:  echo '<json request>' | axhelper <command>
 // Output: one JSON object on stdout: {"ok":true,...} or {"ok":false,"error":{"code","message"}}
 //
-// Commands: check, apps, tree, find, inspect, press, set-value, element-at, type, hotkey, click
+// Commands: check, apps, tree, find, inspect, press, set-value, element-at, type, hotkey, click,
+// pdf-text (text of a PDF via PDFKit; needs no permissions)
 //
 // Element addressing: a "path" is a dot-separated list of child indices from the application
 // element ("" = the app itself, "1.0.3" = 2nd child → 1st child → 4th child). Alternatively a
@@ -13,6 +14,7 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import PDFKit
 
 // MARK: - Output
 
@@ -519,6 +521,26 @@ func run(_ cmd: String, _ r: Req) throws -> [String: Any] {
         let count = int(r, "count", 1)
         try click(x: x, y: y, button: button, count: count)
         return ["x": x, "y": y, "button": button, "count": count]
+
+    case "pdf-text":
+        // Read-only: opens the file, never writes. Pages are 1-based; text is capped by maxChars.
+        let path = try string(r, "path")
+        guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else {
+            throw Fail(code: "bad_pdf", message: "not a readable PDF")
+        }
+        if doc.isLocked { throw Fail(code: "pdf_locked", message: "the PDF is password-protected") }
+        let maxChars = int(r, "maxChars", 200_000)
+        var text = ""
+        var pagesRead = 0
+        for i in 0..<doc.pageCount {
+            guard text.count < maxChars else { break }
+            let pageText = doc.page(at: i)?.string ?? ""
+            text += "--- page \(i + 1) ---\n" + pageText + "\n"
+            pagesRead += 1
+        }
+        let truncated = text.count > maxChars || pagesRead < doc.pageCount
+        if text.count > maxChars { text = String(text.prefix(maxChars)) }
+        return ["pages": doc.pageCount, "pagesRead": pagesRead, "text": text, "truncated": truncated]
 
     default:
         throw Fail(code: "unknown_command", message: "unknown command '\(cmd)'")

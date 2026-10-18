@@ -11,6 +11,7 @@ import { DATA_DIR, ensureDir, SCRATCH_DIR } from "../src/core/paths.ts";
 import { startGuiServer, type GuiServer } from "../src/gui/server.ts";
 
 const tmp = mkdtempSync(join(ensureDir(SCRATCH_DIR), "gui-test-"));
+process.env.DESKPILOT_UPLOADS_DIR = join(tmp, "uploads");
 const logger = new ActionLogger(join(tmp, "actions.db"));
 const SETTINGS = join(DATA_DIR, "settings.json");
 const settingsBackup = existsSync(SETTINGS) ? readFileSync(SETTINGS, "utf8") : null;
@@ -22,8 +23,16 @@ let gui: GuiServer;
 let base = "";
 let mockUrl = "";
 const mockReplies: object[] = [];
+/** Request bodies the mock model received. */
+const mockRequests: any[] = [];
 const mock = createServer((req, res) => {
-  req.resume().on("end", () => {
+  let raw = "";
+  req.on("data", (c) => (raw += c)).on("end", () => {
+    try {
+      mockRequests.push(JSON.parse(raw));
+    } catch {
+      mockRequests.push(raw);
+    }
     const body = mockReplies.shift() ?? { choices: [{ message: { role: "assistant", content: "fallback reply" }, finish_reason: "stop" }] };
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: "mock-model", usage: { prompt_tokens: 5, completion_tokens: 3 }, ...body }));
   });
@@ -45,6 +54,7 @@ after(async () => {
   if (settingsBackup === null) rmSync(SETTINGS, { force: true });
   else writeFileSync(SETTINGS, settingsBackup);
   rmSync(MARKER, { force: true });
+  delete process.env.DESKPILOT_UPLOADS_DIR;
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -296,5 +306,68 @@ describe("desktop avatars", () => {
     const next = new TextDecoder().decode((await reader.read()).value);
     assert.match(next, new RegExp(`"agent":"${AGENT}"`));
     await reader.cancel();
+  });
+});
+
+describe("attachments through the GUI", () => {
+  const upload = async (name: string, body: string | Uint8Array<ArrayBuffer>, set?: string) => {
+    const qs = new URLSearchParams({ name, ...(set && { set }) });
+    const res = await fetch(`${base}/api/uploads?${qs}`, { method: "POST", headers: { "x-deskpilot-token": gui.token, "content-type": "application/octet-stream" }, body });
+    return { status: res.status, body: (await res.json()) as any };
+  };
+
+  test("upload needs the token; sizes are limited; files can be removed", async () => {
+    const noToken = await fetch(`${base}/api/uploads?name=x.txt`, { method: "POST", body: "x" });
+    assert.equal(noToken.status, 401);
+    const big = await upload("big.bin", new Uint8Array(25 * 1024 * 1024 + 1));
+    assert.equal(big.status, 413);
+    const a = await upload("keep.txt", "keep me");
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    assert.match(a.body.set, /^att-/);
+    const b = await upload("drop.txt", "drop me", a.body.set);
+    assert.equal(b.body.set, a.body.set, "second file joins the same set");
+    assert.equal((await call("DELETE", `/api/uploads/${a.body.set}/drop.txt`)).status, 200);
+    assert.equal((await call("DELETE", `/api/uploads/${a.body.set}/drop.txt`)).status, 404);
+    assert.equal((await upload("x.txt", "x", "att-2026-01-01-00000000")).status, 404, "unknown set");
+  });
+
+  test("a run with attachments: the model gets the list + image, file.read works, files download from the run", async () => {
+    const t = await upload("brief.md", "# Brief\nShip on Friday.");
+    const set = t.body.set;
+    await upload("mock.png", new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64")), set);
+    mockRequests.length = 0;
+    mockReplies.push(
+      { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "f1", type: "function", function: { name: "file__read", arguments: JSON.stringify({ file: "brief.md" }) } }] }, finish_reason: "tool_calls" }] },
+      { choices: [{ message: { role: "assistant", content: "Ship on Friday." }, finish_reason: "stop" }] },
+    );
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
+    const start = await call("POST", "/api/runs", { agent: AGENT, task: "when do we ship?", attachments: set });
+    assert.equal(start.status, 200, JSON.stringify(start.body));
+    const { runId } = start.body;
+    const events = await readEvents(runId, (ty) => ty.includes("closed"));
+    delete process.env.XAI_API_KEY;
+    assert.deepEqual(events.find((e) => e.type === "start")!.data.attachments, ["brief.md", "mock.png"]);
+    assert.equal(events.find((e) => e.type === "end")!.data.summary.status, "completed");
+
+    const user = mockRequests[0].messages.find((m: any) => m.role === "user");
+    assert.ok(Array.isArray(user.content), "image sent as a content part");
+    assert.match(user.content[0].text, /when do we ship\?\n\n<attachments>[\s\S]*brief\.md[\s\S]*mock\.png[^\n]*attached to this message/);
+    assert.match(user.content[1].image_url.url, /^data:image\/png;base64,iVBOR/);
+    const toolMsg = mockRequests[1].messages.find((m: any) => m.role === "tool");
+    assert.match(toolMsg.content, /Ship on Friday/);
+
+    const detail = await call("GET", `/api/runs/${runId}`);
+    assert.deepEqual(detail.body.attachments.map((f: any) => f.name), ["brief.md", "mock.png"]);
+    assert.doesNotMatch(JSON.stringify(logger.getRun(runId)!.transcript_json), /iVBORw0KGgo/, "no base64 in the logged transcript");
+
+    const dl = await fetch(`${base}/api/runs/${runId}/attachments/brief.md?t=${gui.token}`);
+    assert.equal(dl.status, 200);
+    assert.equal(dl.headers.get("content-type"), "application/octet-stream", "never rendered inline");
+    assert.match(dl.headers.get("content-disposition") ?? "", /^attachment; filename\*=UTF-8''brief\.md$/);
+    assert.equal(await dl.text(), "# Brief\nShip on Friday.");
+    // Names are matched exactly within the run's set: no way out of the folder.
+    assert.equal(await rawStatus({}, `/api/runs/${runId}/attachments/..%2F..%2Factions.db`), 404);
+    assert.equal(await rawStatus({}, `/api/runs/${runId}/attachments/%2E%2E`), 404);
+    assert.equal((await call("POST", "/api/runs", { agent: AGENT, task: "x", attachments: "att-2026-01-01-00000000" })).status, 400);
   });
 });

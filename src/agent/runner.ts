@@ -1,9 +1,11 @@
 // The single-agent loop: model → tool calls → executor (validate, classify, approve, run, log) → model.
 import { randomUUID } from "node:crypto";
+import type { AttachmentSet } from "../core/attachments.ts";
 import type { Executor } from "../core/executor.ts";
 import type { ActionLogger, RunStatus, RunSummary } from "../core/logger.ts";
 import { defineTool, ToolError, toolSpec, type ToolDef } from "../core/tool.ts";
-import type { ModelProvider, ToolResultInput, TurnInput, Usage } from "../llm/types.ts";
+import type { InlineFile, ModelProvider, ToolResultInput, TurnInput, Usage } from "../llm/types.ts";
+import { attachmentsNote, FILE_READ_TOOL, makeFileReadTool, pickInlineFiles } from "../tools/file.ts";
 import {
   DELEGATE_TOOL,
   DelegateInput,
@@ -18,7 +20,7 @@ import { needsAlwaysAsk, resolveTools, type AgentDefinition } from "./definition
 import { buildSystemPrompt, formatToolResult } from "./prompt.ts";
 
 export type RunEvent =
-  | { type: "start"; runId: string; tools: string[] }
+  | { type: "start"; runId: string; tools: string[]; attachments?: string[] | undefined }
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
   | { type: "tool_call"; name: string; input: unknown }
@@ -45,6 +47,12 @@ export interface RunDeps {
   delegation?: Delegation | undefined;
   /** The run that started this one. */
   parent?: ParentLink | undefined;
+  /**
+   * Files attached to the task. The run gets file.read over them; with showToModel, images (and PDFs
+   * where the provider supports it) are also sent to the model with the task. Delegated runs share
+   * the set but read it with file.read only.
+   */
+  attachments?: { set: AttachmentSet; showToModel: boolean } | undefined;
 }
 
 export interface RunResult extends RunSummary {
@@ -75,8 +83,19 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
   let blockedActions = 0;
   const started = Date.now();
 
-  const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL);
-  let executor = deps.executor;
+  const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL && t.name !== FILE_READ_TOOL);
+  const runTools: ToolDef[] = [];
+  const att = deps.attachments?.set.files.length ? deps.attachments : undefined;
+  // Images/PDFs the model can view go along with the task; everything stays readable with file.read.
+  let inline: InlineFile[] = [];
+  if (att?.showToModel && deps.provider.fileInputs) {
+    try {
+      inline = pickInlineFiles(att.set, await deps.provider.fileInputs(def.model.id));
+    } catch {
+      inline = [];
+    }
+  }
+  if (att) runTools.push(makeFileReadTool(att.set, inline.map((f) => f.name)));
   if (deps.delegation) {
     const delegateTool = makeDelegateTool(def, deps.delegation, {
       parentRunId: runId,
@@ -91,11 +110,10 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
         blockedActions += blocked;
       },
     });
-    if (delegateTool) {
-      tools.push(delegateTool);
-      executor = deps.executor.withTools([delegateTool]);
-    }
+    if (delegateTool) runTools.push(delegateTool);
   }
+  tools.push(...runTools);
+  const executor = runTools.length ? deps.executor.withTools(runTools) : deps.executor;
   const allowed = new Set(tools.map((t) => t.name));
 
   const session = deps.provider.startSession({
@@ -109,6 +127,10 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     effort: def.model.effort,
   });
 
+  const firstText = att
+    ? `${task}\n\n${attachmentsNote(att.set, { shownToModel: inline.map((f) => f.name), canDelegate: runTools.some((t) => t.name === DELEGATE_TOOL) })}`
+    : task;
+
   deps.logger.startRun({
     id: runId,
     agent: def.name,
@@ -117,14 +139,15 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     task,
     parentRunId: deps.parent?.runId,
     relation: deps.parent?.relation,
+    attachments: att?.set.id,
   });
-  emit({ type: "start", runId, tools: [...allowed] });
+  emit({ type: "start", runId, tools: [...allowed], ...(att && { attachments: att.set.files.map((f) => f.name) }) });
 
   let steps = 0;
   let finalText: string | undefined;
   let status: RunStatus = "budget_exhausted";
   let error: string | undefined;
-  let input: TurnInput = { kind: "user", text: task };
+  let input: TurnInput = { kind: "user", text: firstText, ...(inline.length && { files: inline }) };
 
   try {
     while (true) {
@@ -296,6 +319,7 @@ function makeDelegateTool(
         runId: childRunId,
         parent: { runId: run.parentRunId, relation: "delegate" },
         delegation: { loadAgent: delegation.loadAgent, providerFor: delegation.providerFor, listAgents: delegation.listAgents, chain: childChain },
+        attachments: run.deps.attachments && { set: run.deps.attachments.set, showToModel: false },
         // Nested runs' events already arrive wrapped; pass those through unchanged.
         onEvent: (e) => run.emit(e.type === "sub" ? e : { type: "sub", runId: childRunId, agent: target.name, depth, event: e }),
       });

@@ -39,3 +39,20 @@ export function presenceUrl(): string {
 export function eventsUrl(runId: string): string {
   return `/api/runs/${encodeURIComponent(runId)}/events?t=${encodeURIComponent(TOKEN)}`;
 }
+
+/** Upload one file (raw body) into an attachment set; the first upload creates the set. */
+export async function uploadFile(file: File, set: string | null): Promise<{ set: string; file: import("./types").AttachedFile }> {
+  const qs = new URLSearchParams({ name: file.name, ...(set && { set }) });
+  const res = await fetch(`/api/uploads?${qs}`, {
+    method: "POST",
+    headers: { "x-deskpilot-token": TOKEN, "content-type": "application/octet-stream" },
+    body: file,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error ?? `HTTP ${res.status}`);
+  return data as { set: string; file: import("./types").AttachedFile };
+}
+
+export function attachmentUrl(runId: string, name: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}/attachments/${encodeURIComponent(name)}?t=${encodeURIComponent(TOKEN)}`;
+}

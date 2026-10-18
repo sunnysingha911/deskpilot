@@ -3,7 +3,8 @@
 // (4096 here), which would silently truncate our system prompt + tool schemas.
 //
 // Keep num_ctx stable across requests: changing it makes Ollama reload the model (tens of seconds).
-import type { ModelProvider, ModelSession, ModelTurn, SessionOptions, ToolSchema, TurnInput } from "./types.ts";
+import { omitInlineData } from "./redact.ts";
+import type { FileInputs, ModelProvider, ModelSession, ModelTurn, SessionOptions, ToolSchema, TurnInput } from "./types.ts";
 
 export const OLLAMA_BASE_URL = "http://localhost:11434";
 export const DEFAULT_OLLAMA_CONTEXT = 32_768;
@@ -15,7 +16,9 @@ interface WireToolCall {
   function: { name: string; arguments: Record<string, unknown> | string };
 }
 type WireMessage =
-  | { role: "system" | "user"; content: string }
+  | { role: "system"; content: string }
+  /** images: base64, for vision models only. */
+  | { role: "user"; content: string; images?: string[] }
   | { role: "assistant"; content: string; thinking?: string; tool_calls?: WireToolCall[] }
   | { role: "tool"; content: string; tool_name: string; tool_call_id?: string };
 
@@ -97,7 +100,9 @@ class OllamaSession implements ModelSession {
 
   async next(input: TurnInput): Promise<ModelTurn> {
     if (input.kind === "user") {
-      this.messages.push({ role: "user", content: input.text });
+      // The runner only passes images when fileInputs() said this model has vision.
+      const images = (input.files ?? []).filter((f) => f.mime.startsWith("image/")).map((f) => f.data);
+      this.messages.push({ role: "user", content: input.text, ...(images.length && { images }) });
     } else if (input.kind === "tool_results") {
       for (const r of input.results) {
         this.messages.push({ role: "tool", content: r.content, tool_name: this.callNames.get(r.id) ?? "", tool_call_id: r.id });
@@ -170,7 +175,7 @@ class OllamaSession implements ModelSession {
   }
 
   transcript(): unknown {
-    return this.messages;
+    return omitInlineData(this.messages);
   }
 }
 
@@ -186,6 +191,22 @@ export class OllamaProvider implements ModelProvider {
 
   startSession(opts: SessionOptions): ModelSession {
     return new OllamaSession(this.root, this.cfg, opts);
+  }
+
+  /** Images only for models with the "vision" capability (asked from the local server; free). */
+  async fileInputs(model: string): Promise<FileInputs> {
+    try {
+      const res = await fetch(`${this.root}/api/show`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model }),
+        signal: AbortSignal.timeout(5000),
+      });
+      const body = (await res.json()) as { capabilities?: string[] };
+      return { images: !!body.capabilities?.includes("vision"), pdf: false };
+    } catch {
+      return { images: false, pdf: false };
+    }
   }
 }
 

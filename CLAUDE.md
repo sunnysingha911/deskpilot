@@ -59,7 +59,7 @@ ui/              control panel frontend: React 19 + TS + Vite + Tailwind 4 + sha
                  Builds to static ui/dist (gitignored) so Electron/Tauri can load it later.
 src/agent/schema.ts  browser-safe zod agent schema shared by core, CLI and UI
 src/llm/connections.ts  named provider connections, data/settings.json, write-only key storage in .env
-native/axhelper/ Swift package for AX API
+native/axhelper/ Swift package for AX API (+ `pdf-text` via PDFKit)
 native/overlay/  Swift package: transparent always-on-top window hosting the avatars page (#/overlay)
 scripts/         hand-run CLIs / smoke checks
 docs/            permissions.md and other docs
@@ -82,10 +82,11 @@ data/            SQLite DBs (gitignored)
 - **Phase 4+ — Multiple agents and orchestrator**, memory, specialist definitions.
   Done so far: agent-to-agent delegation (`agent.delegate`), @mentions, GUI picks and hand-offs;
   `orchestrator` (plans with `plan.update`, delegates to any agent, no desktop tools) and specialists
-  `coder`, `security-auditor`, `job-hunter`, `notes-reader`.
+  `coder`, `security-auditor`, `job-hunter`, `notes-reader`. File attachments on tasks (`file.read`).
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
+- `npm run agent -- <agent> "<task>" --file <path>` attaches files (repeatable)
 - `npm run gui` (build UI + open window + desktop avatars; `-- --no-overlay` to skip them) · `npm run dev:ui` (Vite dev with reload) · `npm run build:ui` · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
 - `npm run logs -- [n]`, `npm test`, `npm run typecheck`, `npm run build:native`, `npm run notes-demo`
 
@@ -136,6 +137,18 @@ data/            SQLite DBs (gitignored)
 - Idle agents disintegrate into magic dust and gather from it when a run needs them (ui/src/lib/dust.ts:
   the SVG is rasterised via a data: URL and turned into particles; plain fade under reduce-motion or if
   that fails). Looks are original stylized game-hero designs: outfit, back gear, headgear, glow colour.
+
+## Attachment invariants
+- Attached files are copies in `data/uploads/<setId>/` (`src/core/attachments.ts`); names are reduced to a
+  safe basename; ≤10 files × 25 MB. Uploads: `POST /api/uploads?name=&set=` (raw body, token required),
+  `DELETE /api/uploads/<set>/<name>`; downloads only as `application/octet-stream` + attachment.
+  `runs.attachments` holds the set id. Tests set `DESKPILOT_UPLOADS_DIR` into scratch/.
+- A run with attachments gets a per-run `file.read` (read-only, untrusted output, input is an enum of
+  that set's names, so nothing else is reachable) and an `<attachments>` note after the task saying
+  contents are data. Delegated runs share the set (file.read only, no inline copies).
+- Inline files: `ModelProvider.fileInputs(model)` says what a model can view (Anthropic: images + PDFs;
+  OpenAI-compatible: images, retried once as text if the server rejects them; Ollama: images for
+  models with the "vision" capability). Transcripts in the log drop base64 data (`omitInlineData`).
 
 ## GUI invariants
 - Server binds 127.0.0.1 only; every /api call needs the per-launch token (header, or `?t=` for SSE);

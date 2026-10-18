@@ -1,6 +1,7 @@
 // OpenAI-compatible adapter: Chat Completions over plain fetch (no SDK).
 // Works with OpenAI, xAI Grok, Gemini's OpenAI endpoint, OpenRouter, and local Ollama / LM Studio.
-import type { ModelProvider, ModelSession, ModelTurn, SessionOptions, StopKind, ToolSchema, TurnInput } from "./types.ts";
+import { omitInlineData } from "./redact.ts";
+import type { FileInputs, InlineFile, ModelProvider, ModelSession, ModelTurn, SessionOptions, StopKind, ToolSchema, TurnInput } from "./types.ts";
 
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 
@@ -12,9 +13,29 @@ interface WireToolCall {
 }
 type WireMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: string | UserPart[] }
   | { role: "assistant"; content: string | null; tool_calls?: WireToolCall[]; refusal?: string | null }
   | { role: "tool"; tool_call_id: string; content: string };
+
+type UserPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
+/** Images ride along as data: URLs (PDFs aren't sent: they're read with file.read). */
+export function userMessage(text: string, files: InlineFile[] = []): Extract<WireMessage, { role: "user" }> {
+  const images = files.filter((f) => f.mime.startsWith("image/"));
+  if (!images.length) return { role: "user", content: text };
+  return { role: "user", content: [{ type: "text", text }, ...images.map((f) => ({ type: "image_url" as const, image_url: { url: `data:${f.mime};base64,${f.data}` } }))] };
+}
+
+const NO_IMAGES_NOTE = "\n\n(The attached images couldn't be shown to this model; read the files with file.read instead.)";
+
+class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 interface WireResponse {
   model: string;
@@ -97,20 +118,38 @@ class OpenAICompatibleSession implements ModelSession {
       } catch {
         /* not JSON */
       }
-      throw new Error(`${res.status} from ${new URL(url).host}: ${message.slice(0, 500)}`);
+      throw new HttpError(res.status, `${res.status} from ${new URL(url).host}: ${message.slice(0, 500)}`);
     }
   }
 
   async next(input: TurnInput): Promise<ModelTurn> {
+    let withImages = false;
     if (input.kind === "user") {
-      this.messages.push({ role: "user", content: input.text });
+      const m = userMessage(input.text, input.files);
+      withImages = Array.isArray(m.content);
+      this.messages.push(m);
     } else if (input.kind === "tool_results") {
       // No is_error field in this API; the content itself starts with ERROR / BLOCKED.
       for (const r of input.results) this.messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
     }
 
+    let res: WireResponse;
+    try {
+      res = await this.request();
+    } catch (err) {
+      // A model without vision rejects image parts. The model never saw that message, so replace it
+      // with the text alone (plus a note) and try once more.
+      if (!(withImages && err instanceof HttpError && err.status === 400)) throw err;
+      const last = this.messages[this.messages.length - 1] as Extract<WireMessage, { role: "user" }>;
+      last.content = (input as { text: string }).text + NO_IMAGES_NOTE;
+      res = await this.request();
+    }
+    return this.read(res);
+  }
+
+  private request(): Promise<WireResponse> {
     const effort = this.opts.effort === "xhigh" || this.opts.effort === "max" ? "high" : this.opts.effort;
-    const res = await this.post({
+    return this.post({
       model: this.opts.model,
       messages: this.messages,
       ...(this.tools.length && { tools: this.tools, tool_choice: "auto", parallel_tool_calls: true }),
@@ -119,7 +158,9 @@ class OpenAICompatibleSession implements ModelSession {
       // OpenAI's Chat Completions rejects reasoning_effort together with tools (gpt-5.5), so only send it elsewhere.
       ...(effort && !(this.isOpenAI() && this.tools.length) && { reasoning_effort: effort }),
     });
+  }
 
+  private read(res: WireResponse): ModelTurn {
     const choice = res.choices[0];
     if (!choice) throw new Error("response had no choices");
     const msg = choice.message;
@@ -166,7 +207,7 @@ class OpenAICompatibleSession implements ModelSession {
   }
 
   transcript(): unknown {
-    return this.messages;
+    return omitInlineData(this.messages);
   }
 }
 
@@ -175,5 +216,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
   constructor(private cfg: { baseUrl: string; apiKey: string | undefined }) {}
   startSession(opts: SessionOptions): ModelSession {
     return new OpenAICompatibleSession(this.cfg, opts);
+  }
+
+  /** Most servers here take images; a model without vision gets the text instead (see next()). */
+  async fileInputs(): Promise<FileInputs> {
+    return { images: true, pdf: false };
   }
 }

@@ -1,5 +1,6 @@
 // Run manager for the GUI: starts runs, streams events, routes approvals to the window, handles stop
 // and provider fallback. One active run at a time, since desktop actions from two agents would collide.
+import { listSet, setExists, type AttachmentSet } from "../core/attachments.ts";
 import { randomUUID } from "node:crypto";
 import { handoffTaskMessage, type ParentLink } from "../agent/delegate.ts";
 import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../agent/definition.ts";
@@ -49,6 +50,8 @@ export interface StartRequest {
   with?: string[] | undefined;
   /** Start from this earlier run's final answer (passed to the agent as data). */
   fromRun?: string | undefined;
+  /** Upload folder id (POST /api/uploads) of the files attached to this task. */
+  attachments?: string | undefined;
 }
 
 /** Provider for an agent called by another agent: its own connection, no fallback. */
@@ -132,6 +135,13 @@ export class RunManager {
       parent = { runId: req.fromRun, relation: "handoff" };
     }
 
+    let attachmentSet: AttachmentSet | undefined;
+    if (req.attachments) {
+      if (!setExists(req.attachments)) throw new Error("those attachments are gone; attach the files again");
+      const set = listSet(req.attachments);
+      if (set.files.length) attachmentSet = set;
+    }
+
     const attempts = this.plan(def, req);
     const firstConn = attempts[0]!.conn;
     if (!keyIsSet(firstConn) && attempts.length === 1) throw new Error(`${firstConn.label}: ${firstConn.keyEnv} is not set`);
@@ -176,7 +186,16 @@ export class RunManager {
             provider = createProvider(toModelSpec(conn, model));
           } catch (err) {
             // Couldn't even build the client (e.g. missing key): record a failed attempt and move on.
-            this.logger.startRun({ id: currentRunId, agent: def.name, provider: conn.kind, model, task, parentRunId: parent?.runId, relation: parent?.relation });
+            this.logger.startRun({
+              id: currentRunId,
+              agent: def.name,
+              provider: conn.kind,
+              model,
+              task,
+              parentRunId: parent?.runId,
+              relation: parent?.relation,
+              attachments: attachmentSet?.id,
+            });
             const msg = err instanceof Error ? err.message : String(err);
             this.logger.finishRun(currentRunId, { status: "error", steps: 0, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: msg, transcript: [] });
             this.publish(currentRunId, { type: "end", summary: { status: "error", steps: 0, error: msg } });
@@ -196,6 +215,7 @@ export class RunManager {
             delegation: { loadAgent, providerFor: providerForAgent, userAllowed, listAgents: () => listAgents().map((a) => a.name) },
             signal: active.controller.signal,
             onEvent: (e, id) => this.publish(currentRunId, e, id),
+            attachments: attachmentSet && { set: attachmentSet, showToModel: true },
           });
           // Fall back only if nothing happened yet: no step finished, so no tool can have run.
           const canFallBack = result.status === "error" && result.steps === 0 && i + 1 < attempts.length && !active.controller.signal.aborted;
