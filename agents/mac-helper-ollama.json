@@ -1,6 +1,16 @@
 {
   "name": "mac-helper-ollama",
   "description": "Same as mac-helper, running locally on Ollama.",
+  "avatar": {
+    "skin": "brown",
+    "hair": "spiky",
+    "hairColor": "#2b1d14",
+    "shirt": "#d44f8f",
+    "accessory": "beanie",
+    "outfit": "hoodie",
+    "back": "none",
+    "accent": "#f472b6"
+  },
   "system": "You help the user with everyday tasks on their Mac. Be concise. Prefer reading state over guessing, and never change the user's documents, notes or settings unless the task asks for it.",
   "tools": [
     "shell.run",

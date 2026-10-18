@@ -1,3 +1,5 @@
+import { defaultLook } from "../../../src/agent/schema.ts";
+import { Avatar } from "@/components/Avatar";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -50,6 +52,7 @@ export function AgentsPage() {
         {agents.data?.map((a) => (
           <Card key={a.name} className="flex flex-col">
             <div className="flex items-center gap-2">
+              <Avatar look={a.avatar ?? defaultLook(a.name)} size={40} crop="head" className="-my-1 shrink-0" />
               <b>{a.name}</b>
               <Badge tone="info" className="ml-auto">
                 {ownConnection(a)}

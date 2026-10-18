@@ -1,6 +1,16 @@
 {
   "name": "mac-helper-openai",
   "description": "Same as mac-helper, running on OpenAI.",
+  "avatar": {
+    "skin": "brown",
+    "hair": "short",
+    "hairColor": "#2b1d14",
+    "shirt": "#2a9bb5",
+    "accessory": "cap",
+    "outfit": "jacket",
+    "back": "pack",
+    "accent": "#34d399"
+  },
   "system": "You help the user with everyday tasks on their Mac. Be concise. Prefer reading state over guessing, and never change the user's documents, notes or settings unless the task asks for it.",
   "tools": [
     "shell.run",

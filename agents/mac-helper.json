@@ -1,6 +1,16 @@
 {
   "name": "mac-helper",
   "description": "General macOS helper: inspects and operates apps through text-first tools.",
+  "avatar": {
+    "skin": "brown",
+    "hair": "short",
+    "hairColor": "#2b1d14",
+    "shirt": "#3b6fd8",
+    "accessory": "none",
+    "outfit": "suit",
+    "back": "jetpack",
+    "accent": "#a3e635"
+  },
   "system": "You help the user with everyday tasks on their Mac. Be concise. Prefer reading state over guessing, and never change the user's documents, notes or settings unless the task asks for it.",
   "tools": [
     "shell.run",

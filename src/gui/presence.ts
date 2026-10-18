@@ -1,0 +1,208 @@
+// Agent presence for the desktop avatars: turns run events into who is on stage, their mood and a
+// short status line. Status lines are our own wording (tool and agent names), never model output.
+import { type AvatarLook } from "../agent/schema.ts";
+
+export const MOODS = ["idle", "thinking", "working", "talking", "waiting", "worried", "sad", "happy", "frustrated", "waving"] as const;
+export type Mood = (typeof MOODS)[number];
+
+export interface Presence {
+  /** Run id of this agent's run (the first attempt's id for the top-level agent). */
+  key: string;
+  /** Top-level run the user started; clicking the avatar opens it. */
+  rootRunId: string;
+  agent: string;
+  look: AvatarLook;
+  mood: Mood;
+  status: string;
+  depth: number;
+  /** Disintegrating into dust; removed after the exit animation. */
+  leaving: boolean;
+}
+
+export interface PresenceState {
+  avatars: Presence[];
+  /** True while an agent drives the real keyboard/mouse: the overlay steps aside so clicks land on the app. */
+  hideForInput: boolean;
+}
+
+type Ev = { type: string; [k: string]: any };
+
+const TOOL_STATUS: Array<[RegExp, string]> = [
+  [/^shell\.run$/, "running a command"],
+  [/^applescript\.run$/, "scripting an app"],
+  [/^ui\.(dump_tree|find|list_apps|check_access)$/, "reading the screen"],
+  [/^ui\.(press|set_value)$/, "using an app"],
+  [/^input\./, "using keyboard & mouse"],
+  [/^browser\./, "browsing the web"],
+  [/^plan\.update$/, "planning"],
+];
+const toolStatus = (name: string) => TOOL_STATUS.find(([re]) => re.test(name))?.[1] ?? `using ${name}`;
+const short = (s: string, n = 40) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
+export interface PresenceTiming {
+  /** Pause on the final expression before a finished run's avatars leave. */
+  leaveAfterEndMs: number;
+  /** Same for an agent that finished a delegated sub-task. */
+  leaveAfterDelegateMs: number;
+  /** Length of the dust exit animation (the UI's runs a little shorter). */
+  dissolveMs: number;
+}
+export const DEFAULT_TIMING: PresenceTiming = { leaveAfterEndMs: 4000, leaveAfterDelegateMs: 2500, dissolveMs: 1600 };
+
+export class PresenceTracker {
+  private avatars = new Map<string, Presence>();
+  private inputDepth = 0;
+  private listeners = new Set<(s: PresenceState) => void>();
+  private timers = new Set<NodeJS.Timeout>();
+
+  constructor(
+    private lookFor: (agent: string) => AvatarLook,
+    private timing: PresenceTiming = DEFAULT_TIMING,
+  ) {}
+
+  snapshot(): PresenceState {
+    return { avatars: [...this.avatars.values()], hideForInput: this.inputDepth > 0 };
+  }
+
+  subscribe(fn: (s: PresenceState) => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private notify(): void {
+    const s = this.snapshot();
+    for (const fn of this.listeners) fn(s);
+  }
+
+  private later(ms: number, fn: () => void): void {
+    const t = setTimeout(() => {
+      this.timers.delete(t);
+      fn();
+    }, ms);
+    this.timers.add(t);
+  }
+
+  /** Bring an agent on stage (it gathers from magic dust). */
+  arrive(key: string, rootRunId: string, agent: string, depth: number, mood: Mood = "idle", status = "on my way"): void {
+    this.avatars.set(key, { key, rootRunId, agent, look: this.lookFor(agent), mood, status, depth, leaving: false });
+    this.notify();
+  }
+
+  /** Send an agent away (it disintegrates into dust). */
+  leave(key: string, afterMs = 0): void {
+    this.later(afterMs, () => {
+      const a = this.avatars.get(key);
+      if (!a || a.leaving) return;
+      a.leaving = true;
+      this.notify();
+      this.later(this.timing.dissolveMs, () => {
+        if (this.avatars.get(key)?.leaving) {
+          this.avatars.delete(key);
+          this.notify();
+        }
+      });
+    });
+  }
+
+  private set(key: string, mood: Mood, status: string): void {
+    const a = this.avatars.get(key);
+    if (!a) return;
+    a.mood = mood;
+    a.status = short(status);
+    a.leaving = false;
+    this.notify();
+  }
+
+  /** Apply one top-level run event (as published by the run manager). */
+  apply(rootKey: string, e: Ev): void {
+    if (e.type === "approval_request") {
+      const key = typeof e.subRunId === "string" && this.avatars.has(e.subRunId) ? e.subRunId : rootKey;
+      return this.set(key, "worried", `needs your OK: ${e.tool}`);
+    }
+    if (e.type === "approval_resolved") {
+      for (const a of this.avatars.values()) {
+        if (a.rootRunId === rootKey && a.mood === "worried") this.set(a.key, e.approved ? "working" : "sad", e.approved ? "thanks, continuing" : "okay, I won't");
+      }
+      return;
+    }
+    if (e.type === "closed") {
+      for (const a of this.avatars.values()) if (a.rootRunId === rootKey) this.leave(a.key, this.timing.leaveAfterEndMs);
+      this.inputDepth = 0;
+      return;
+    }
+    if (e.type === "stopping") return this.set(rootKey, "sad", "stopping");
+    if (e.type === "fallback") return this.set(rootKey, "thinking", `switching to ${e.to}`);
+    this.applyRun(rootKey, rootKey, 0, e);
+  }
+
+  private applyRun(rootKey: string, key: string, depth: number, e: Ev): void {
+    switch (e.type) {
+      case "sub":
+        return this.applyRun(rootKey, e.runId, e.depth, e.event);
+      case "start":
+        return this.set(key, "thinking", "getting started");
+      case "thinking":
+        return this.set(key, "thinking", "thinking…");
+      case "text":
+        return this.set(key, "talking", "explaining");
+      case "tool_call": {
+        const name = String(e.name);
+        if (name === "agent.delegate") return this.set(key, "waving", `handing off to ${e.input?.agent ?? "a teammate"}`);
+        if (name.startsWith("input.")) {
+          this.inputDepth++;
+          this.notify();
+        }
+        return this.set(key, name === "plan.update" ? "thinking" : "working", toolStatus(name));
+      }
+      case "tool_result":
+        if (String(e.name).startsWith("input.") && this.inputDepth > 0) {
+          this.inputDepth--;
+          this.notify();
+        }
+        if (e.status === "blocked") return this.set(key, "sad", "that wasn't approved");
+        if (e.status === "error" && e.name !== "agent.delegate") return this.set(key, "frustrated", "hit a snag, retrying");
+        return;
+      case "delegate_start":
+        this.arrive(e.runId, rootKey, e.agent, e.depth, "waving", "on it!");
+        return this.set(key, "waiting", `waiting for ${e.agent}`);
+      case "delegate_end": {
+        const ok = e.status === "completed";
+        this.set(e.runId, ok ? "happy" : "sad", ok ? "done, over to you" : "couldn't finish");
+        this.leave(e.runId, this.timing.leaveAfterDelegateMs);
+        return this.set(key, "thinking", `reading ${e.agent}'s answer`);
+      }
+      case "end": {
+        const s = e.summary?.status;
+        if (s === "completed") return this.set(key, "happy", "all done!");
+        if (s === "stopped") return this.set(key, "sad", "stopped");
+        return this.set(key, "frustrated", s === "budget_exhausted" ? "ran out of budget" : "something went wrong");
+      }
+      default:
+        void depth;
+        return;
+    }
+  }
+
+  /** Play a short show of expressions (Agent editor → "Preview on desktop"). */
+  preview(agent: string, look: AvatarLook): void {
+    const key = `preview-${agent}-${Date.now()}`;
+    this.avatars.set(key, { key, rootRunId: "", agent, look, mood: "waving", status: "hi, I'm " + agent, depth: 0, leaving: false });
+    this.notify();
+    const steps: Array<[Mood, string]> = [
+      ["thinking", "thinking…"],
+      ["working", "running a command"],
+      ["worried", "needs your OK"],
+      ["sad", "okay, I won't"],
+      ["frustrated", "hit a snag"],
+      ["happy", "all done!"],
+    ];
+    steps.forEach(([mood, status], i) => this.later(1600 * (i + 1), () => this.set(key, mood, status)));
+    this.leave(key, 1600 * (steps.length + 1));
+  }
+
+  close(): void {
+    for (const t of this.timers) clearTimeout(t);
+    this.timers.clear();
+    this.listeners.clear();
+  }
+}

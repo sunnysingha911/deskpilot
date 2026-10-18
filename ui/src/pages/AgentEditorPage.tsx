@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, Save } from "lucide-react";
+import { MonitorUp, RefreshCw, Save, Shuffle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link, useNavigate, useParams } from "react-router";
-import { AgentDefinition, matchesPattern } from "../../../src/agent/schema.ts";
+import { ACCESSORIES, AgentDefinition, type AvatarLook, BACK_ITEMS, defaultLook, HAIR_STYLES, matchesPattern, OUTFITS, SKIN_TONES } from "../../../src/agent/schema.ts";
+import { Avatar, MOOD_LIST, SKIN, type Mood } from "@/components/Avatar";
 import { PageHeader, useMeta } from "@/components/Layout";
 import { useToast } from "@/components/Toast";
 import { StatusBadge } from "@/components/ui/badge";
@@ -34,6 +35,7 @@ interface FormValues {
   canDelegateTo: string[];
   askDelegate: boolean;
   readOnlyFreely: boolean;
+  avatar: AvatarLook;
 }
 
 /** The delegation tool isn't in the OS tool list, so its "ask" rule is kept separately. */
@@ -77,6 +79,7 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
   const [issues, setIssues] = useState<string[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [showJson, setShowJson] = useState(false);
+  const [previewMood, setPreviewMood] = useState<Mood>("idle");
 
   const source = mode === "new" ? BLANK : agents.data?.find((a) => a.name === name);
   const form = useForm<FormValues>();
@@ -101,6 +104,7 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
       canDelegateTo: source.canDelegateTo,
       askDelegate: source.approval.alwaysAsk.includes(DELEGATE_TOOL),
       readOnlyFreely: source.approval.askAbove === "read_only",
+      avatar: source.avatar ?? defaultLook(source.name || "new-agent"),
     });
     setModels(modelCache.get(ownConnection(source)) ?? []);
   }, [source, tools, mode, reset]);
@@ -129,6 +133,7 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
         maxTokensPerTurn: Number(v.maxTokensPerTurn),
       },
       budget: { maxSteps: Number(v.maxSteps), maxOutputTokens: Number(v.maxOutputTokens), maxSeconds: Number(v.maxSeconds) },
+      ...(v.avatar && { avatar: v.avatar }),
       canDelegateTo: v.canDelegateTo ?? [],
       approval: {
         alwaysAsk: [...compress(v.alwaysAsk, tools), ...(v.askDelegate ? [DELEGATE_TOOL] : [])],
@@ -182,6 +187,109 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
             placeholder="e.g. You are a cybersecurity analyst. Audit this Mac's open ports and running services and report risks. Never change settings."
           />
         </Field>
+
+        {watch("avatar") && (
+          <section>
+            <CardTitle className="mb-3">Avatar</CardTitle>
+            <div className="flex flex-wrap items-start gap-6">
+              <div className="flex flex-col items-center gap-2">
+                <div className="rounded-xl border bg-muted/50 px-4 pt-2">
+                  <Avatar look={watch("avatar")} mood={previewMood} size={130} />
+                </div>
+                <div className="flex max-w-56 flex-wrap justify-center gap-1">
+                  {MOOD_LIST.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={`cursor-pointer rounded-full border px-2 py-0.5 text-[11px] ${m === previewMood ? "border-primary bg-accent text-accent-foreground" : "text-muted-foreground"}`}
+                      onClick={() => setPreviewMood(m)}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid min-w-64 flex-1 grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field label="Skin tone">
+                  <div className="flex gap-1.5">
+                    {SKIN_TONES.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        title={s}
+                        aria-label={s}
+                        onClick={() => setValue("avatar.skin", s, { shouldDirty: true })}
+                        className={`size-7 cursor-pointer rounded-full border-2 ${watch("avatar.skin") === s ? "border-primary" : "border-transparent"}`}
+                        style={{ background: SKIN[s].base }}
+                      />
+                    ))}
+                  </div>
+                </Field>
+                <Field label="Hair">
+                  <div className="flex gap-2">
+                    <NativeSelect {...register("avatar.hair")}>
+                      {HAIR_STYLES.map((h) => (
+                        <option key={h}>{h}</option>
+                      ))}
+                    </NativeSelect>
+                    <Input type="color" {...register("avatar.hairColor")} className="w-12 p-1" title="hair colour" />
+                  </div>
+                </Field>
+                <Field label="Outfit">
+                  <div className="flex gap-2">
+                    <NativeSelect {...register("avatar.outfit")}>
+                      {OUTFITS.map((o) => (
+                        <option key={o}>{o}</option>
+                      ))}
+                    </NativeSelect>
+                    <Input type="color" {...register("avatar.shirt")} className="w-12 p-1" title="outfit colour" />
+                  </div>
+                </Field>
+                <Field label="Back gear">
+                  <NativeSelect {...register("avatar.back")}>
+                    {BACK_ITEMS.map((b) => (
+                      <option key={b}>{b}</option>
+                    ))}
+                  </NativeSelect>
+                </Field>
+                <Field label="Glow colour" hint="Trims, visor, and the magic dust when it appears or vanishes">
+                  <Input type="color" {...register("avatar.accent")} className="w-12 p-1" />
+                </Field>
+                <Field label="Headgear">
+                  <NativeSelect {...register("avatar.accessory")}>
+                    {ACCESSORIES.map((a) => (
+                      <option key={a}>{a}</option>
+                    ))}
+                  </NativeSelect>
+                </Field>
+                <div className="flex gap-2 sm:col-span-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setValue("avatar", defaultLook(`${watch("name")}-${Math.random()}`), { shouldDirty: true })}
+                  >
+                    <Shuffle /> Surprise me
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    title="Shows this avatar on your desktop for a few seconds, cycling through its expressions"
+                    onClick={async () => {
+                      try {
+                        await api("POST", "/api/presence/preview", { agent: watch("name")?.trim() || "new-agent", look: watch("avatar") });
+                        toast("Look at the bottom-right of your screen");
+                      } catch (e) {
+                        toast((e as Error).message, true);
+                      }
+                    }}
+                  >
+                    <MonitorUp /> Preview on desktop
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
 
         <section>
           <CardTitle className="mb-3">Model</CardTitle>

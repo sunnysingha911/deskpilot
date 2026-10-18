@@ -9,6 +9,7 @@ import type { ActionLogger } from "../core/logger.ts";
 import { getConnection, isReady, keyIsSet, listConnections, loadSettings, toModelSpec, type Connection } from "../llm/connections.ts";
 import { createProvider } from "../llm/index.ts";
 import { availableTools } from "../tools/index.ts";
+import type { PresenceTracker } from "./presence.ts";
 
 export type GuiEvent = RunEvent | { type: string; [k: string]: unknown };
 export interface StreamedEvent {
@@ -24,6 +25,8 @@ interface Pending {
 }
 
 interface Active {
+  /** First attempt's run id: stays the same across provider fallbacks (the avatar's key). */
+  rootKey: string;
   runId: string;
   controller: AbortController;
   pending: Map<string, Pending>;
@@ -61,7 +64,10 @@ export class RunManager {
   private active: Active | null = null;
   private listeners = new Map<string, Set<(e: StreamedEvent) => void>>();
 
-  constructor(private logger: ActionLogger) {}
+  constructor(
+    private logger: ActionLogger,
+    private presence?: PresenceTracker,
+  ) {}
 
   activeRunId(): string | null {
     return this.active?.runId ?? null;
@@ -85,6 +91,7 @@ export class RunManager {
 
   private publish(runId: string, data: GuiEvent, id?: number): void {
     const eventId = id ?? this.logger.logRunEvent(runId, data);
+    this.presence?.apply(this.active?.rootKey ?? runId, data);
     for (const fn of this.listeners.get(runId) ?? []) fn({ id: eventId, type: data.type, data });
   }
 
@@ -130,8 +137,9 @@ export class RunManager {
     if (!keyIsSet(firstConn) && attempts.length === 1) throw new Error(`${firstConn.label}: ${firstConn.keyEnv} is not set`);
 
     const runId = newRunId();
-    const active: Active = { runId, controller: new AbortController(), pending: new Map() };
+    const active: Active = { rootKey: runId, runId, controller: new AbortController(), pending: new Map() };
     this.active = active;
+    this.presence?.arrive(runId, runId, def.name, 0);
 
     const approver: Approver = (r) =>
       new Promise<ApprovalDecision>((resolve) => {

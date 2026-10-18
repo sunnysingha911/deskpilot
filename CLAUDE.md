@@ -60,6 +60,7 @@ ui/              control panel frontend: React 19 + TS + Vite + Tailwind 4 + sha
 src/agent/schema.ts  browser-safe zod agent schema shared by core, CLI and UI
 src/llm/connections.ts  named provider connections, data/settings.json, write-only key storage in .env
 native/axhelper/ Swift package for AX API
+native/overlay/  Swift package: transparent always-on-top window hosting the avatars page (#/overlay)
 scripts/         hand-run CLIs / smoke checks
 docs/            permissions.md and other docs
 scratch/         test sandbox (gitignored) — the ONLY place tests may write files
@@ -85,7 +86,7 @@ data/            SQLite DBs (gitignored)
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
-- `npm run gui` (build UI + open window) · `npm run dev:ui` (Vite dev with reload) · `npm run build:ui` · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
+- `npm run gui` (build UI + open window + desktop avatars; `-- --no-overlay` to skip them) · `npm run dev:ui` (Vite dev with reload) · `npm run build:ui` · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
 - `npm run logs -- [n]`, `npm test`, `npm run typecheck`, `npm run build:native`, `npm run notes-demo`
 
 ## Agent loop invariants
@@ -122,6 +123,19 @@ data/            SQLite DBs (gitignored)
   every further `agent.delegate` call in that run needs approval. Results report `blockedActions`.
 - `approval.askAbove: "read_only"` asks before any action above read-only (whatever the tool).
 - `plan.update` (read-only, no side effects) becomes a `plan` run event; the GUI shows the latest.
+
+## Desktop avatar invariants
+- Agents' looks are data (`avatar` in the agent file; else `defaultLook(name)`), drawn once as SVG in
+  `ui/src/components/Avatar.tsx` and used by both the control panel and the overlay.
+- `src/gui/presence.ts` maps run events to mood + status. Status lines are our own words (tool/agent
+  names, capped at 40 chars), never model output. Feed: `/api/presence` (SSE, token required).
+- The overlay never becomes key/main and never activates (input.* needs the target app frontmost);
+  mouse passes through except over avatar rects the page reports; it steps aside (`hideForInput`)
+  while input.* tools run. Only our origin may load in it; web data is non-persistent (nothing in
+  ~/Library). Token reaches it over stdin, not argv. Position is saved in data/overlay.json.
+- Idle agents disintegrate into magic dust and gather from it when a run needs them (ui/src/lib/dust.ts:
+  the SVG is rasterised via a data: URL and turned into particles; plain fade under reduce-motion or if
+  that fails). Looks are original stylized game-hero designs: outfit, back gear, headgear, glow colour.
 
 ## GUI invariants
 - Server binds 127.0.0.1 only; every /api call needs the per-launch token (header, or `?t=` for SSE);

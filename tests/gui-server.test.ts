@@ -283,3 +283,18 @@ describe("agents working together through the GUI", () => {
     delete process.env.XAI_API_KEY;
   });
 });
+
+describe("desktop avatars", () => {
+  test("presence feed needs the token and streams a snapshot; preview validates the look", async () => {
+    assert.equal((await fetch(`${base}/api/presence`)).status, 401);
+    const res = await fetch(`${base}/api/presence?t=${gui.token}`);
+    const reader = res.body!.getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    assert.match(first, /^event: presence\ndata: \{"avatars":\[/);
+    assert.equal((await call("POST", "/api/presence/preview", { agent: AGENT, look: { skin: "green" } })).status, 400);
+    assert.equal((await call("POST", "/api/presence/preview", { agent: AGENT })).status, 200);
+    const next = new TextDecoder().decode((await reader.read()).value);
+    assert.match(next, new RegExp(`"agent":"${AGENT}"`));
+    await reader.cancel();
+  });
+});

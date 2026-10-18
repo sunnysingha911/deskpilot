@@ -8,11 +8,13 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join } from "node:path";
-import { AGENTS_DIR, AgentDefinition, listAgents } from "../agent/definition.ts";
+import { AGENTS_DIR, AgentDefinition, listAgents, loadAgent } from "../agent/definition.ts";
+import { AvatarLook, defaultLook } from "../agent/schema.ts";
 import { ActionLogger } from "../core/logger.ts";
 import { DATA_DIR, ROOT } from "../core/paths.ts";
 import { getConnection, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
 import { availableTools } from "../tools/index.ts";
+import { PresenceTracker, type PresenceTiming } from "./presence.ts";
 import { RunManager } from "./runs.ts";
 
 /** The React UI's production build (npm run build:ui). A desktop shell can load the same folder. */
@@ -83,11 +85,21 @@ export interface GuiServer {
   close(): Promise<void>;
 }
 
-export async function startGuiServer(opts: { port?: number; logger?: ActionLogger } = {}): Promise<GuiServer> {
+/** An agent's avatar: its own look, else one derived from its name. */
+function lookFor(agent: string): AvatarLook {
+  try {
+    return loadAgent(agent).avatar ?? defaultLook(agent);
+  } catch {
+    return defaultLook(agent);
+  }
+}
+
+export async function startGuiServer(opts: { port?: number; logger?: ActionLogger; presenceTiming?: PresenceTiming } = {}): Promise<GuiServer> {
   const token = randomBytes(24).toString("hex");
   const tokenBuf = Buffer.from(token);
   const logger = opts.logger ?? new ActionLogger();
-  const runs = new RunManager(logger);
+  const presence = new PresenceTracker(lookFor, opts.presenceTiming);
+  const runs = new RunManager(logger, presence);
   let port = 0;
 
   const authorized = (req: IncomingMessage, url: URL): boolean => {
@@ -234,6 +246,28 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       return undefined;
     }],
 
+    // Desktop avatars: who is on stage and how they feel (snapshot on connect, then every change).
+    ["GET", /^\/api\/presence$/, (req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream", connection: "keep-alive", ...SECURITY_HEADERS });
+      const write = (s: unknown) => res.write(`event: presence\ndata: ${JSON.stringify(s)}\n\n`);
+      write(presence.snapshot());
+      const unsubscribe = presence.subscribe(write);
+      const ping = setInterval(() => res.write(`: ping\n\n`), 15_000);
+      req.on("close", () => {
+        clearInterval(ping);
+        unsubscribe();
+      });
+      return undefined;
+    }],
+    ["POST", /^\/api\/presence\/preview$/, async (req) => {
+      const b = await readJson(req);
+      if (typeof b.agent !== "string" || !NAME_RE.test(b.agent)) throw new HttpError(400, "agent is required");
+      const look = AvatarLook.safeParse(b.look ?? lookFor(b.agent));
+      if (!look.success) throw new HttpError(400, look.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
+      presence.preview(b.agent, look.data);
+      return { ok: true };
+    }],
+
     // Action log
     ["GET", /^\/api\/actions$/, (_req, _res, _m, url) =>
       logger.queryActions({
@@ -300,6 +334,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     token,
     close: () =>
       new Promise((resolve) => {
+        presence.close();
         server.closeAllConnections();
         server.close(() => resolve());
       }),

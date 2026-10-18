@@ -9,6 +9,7 @@ import { TOKEN } from "@/lib/api";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { AgentEditorPage } from "@/pages/AgentEditorPage";
 import { AgentsPage } from "@/pages/AgentsPage";
+import { OverlayPage } from "@/pages/OverlayPage";
 import { ProvidersPage } from "@/pages/ProvidersPage";
 import { RunDetailPage } from "@/pages/RunDetailPage";
 import { RunPage } from "@/pages/RunPage";
@@ -19,6 +20,8 @@ const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, ref
 
 // Hash routing works the same over http://, file:// and Electron/Tauri custom protocols.
 const router = createHashRouter([
+  // Shown by the desktop overlay window (native/overlay), outside the control panel layout.
+  { path: "/overlay", element: <OverlayPage /> },
   {
     element: <Layout />,
     children: [

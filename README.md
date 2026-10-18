@@ -54,6 +54,14 @@ agents, connect Claude / OpenAI / Grok / Gemini / Ollama, run tasks and watch ea
 or deny irreversible actions, and browse past runs and the full action log. The server listens on
 127.0.0.1 only and every API call needs a per-launch token.
 
+**Desktop avatars.** `npm run gui` also starts a small transparent window on your desktop (bottom-right;
+drag to move) where each working agent appears as a character whose expression follows what it
+is doing: thinking, working, worried while waiting for your approval, sad if you decline, happy when
+done. They're stylized game-style heroes (outfit, back gear, headgear and a glow colour, all set per agent),
+they gather out of magic dust when a run needs them, and disintegrate back into it when they're idle.
+Click an avatar to open its run. Pick each agent's look under Agents → edit → Avatar (*Preview on
+desktop* plays it). Needs `npm run build:native` once; skip with `npm run gui -- --no-overlay`.
+
 UI development with instant reload: `npm run dev:ui` (core API on :4747, Vite on :5173; open the
 printed URL). The UI is React + TypeScript + Vite + Tailwind + shadcn-style components, built to
 static files in `ui/dist` so it can later be loaded by an Electron or Tauri shell unchanged.

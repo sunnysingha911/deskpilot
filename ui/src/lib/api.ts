@@ -32,6 +32,10 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
 
 export const get = <T,>(path: string) => api<T>("GET", path);
 
+export function presenceUrl(): string {
+  return `/api/presence?t=${encodeURIComponent(TOKEN)}`;
+}
+
 export function eventsUrl(runId: string): string {
   return `/api/runs/${encodeURIComponent(runId)}/events?t=${encodeURIComponent(TOKEN)}`;
 }

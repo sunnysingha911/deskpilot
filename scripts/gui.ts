@@ -1,9 +1,11 @@
 // Start the deskpilot control panel and open it in an app-style browser window.
 //   npm run gui              # start + open window
 //   npm run gui -- --no-open # start only, print the URL
+//   npm run gui -- --no-overlay # without the desktop avatars
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { DATA_DIR, ensureDir, ROOT } from "../src/core/paths.ts";
+import { startOverlay, type Overlay } from "../src/gui/overlay.ts";
 import { startGuiServer } from "../src/gui/server.ts";
 import { browserExecutable } from "../src/tools/browser.ts";
 
@@ -19,12 +21,13 @@ const gui = await startGuiServer({ port });
 console.log(`deskpilot control panel: ${gui.url}`);
 console.log("(the URL contains this session's access token; it changes every launch)");
 
-if (!noOpen) {
+/** Open the control panel (optionally at a hash route) in an app-style window. */
+function openPanel(route = ""): void {
   try {
     // Separate profile from both your normal browser and the agents' browser (data/browser-profile).
     const child = spawn(
       browserExecutable(),
-      [`--app=${gui.url}`, `--user-data-dir=${ensureDir(join(DATA_DIR, "gui-profile"))}`, "--no-first-run", "--no-default-browser-check", "--window-size=1280,860"],
+      [`--app=${gui.url}${route}`, `--user-data-dir=${ensureDir(join(DATA_DIR, "gui-profile"))}`, "--no-first-run", "--no-default-browser-check", "--window-size=1280,860"],
       { detached: true, stdio: "ignore" },
     );
     child.unref();
@@ -33,7 +36,17 @@ if (!noOpen) {
   }
 }
 
+if (!noOpen) openPanel();
+
+let overlay: Overlay | undefined;
+if (!process.argv.includes("--no-overlay")) {
+  const o = startOverlay(gui.url, (runId) => openPanel(`#/runs/${runId}`));
+  if ("error" in o) console.log(`desktop avatars: ${o.error}`);
+  else overlay = o;
+}
+
 const shutdown = async () => {
+  overlay?.stop();
   await gui.close();
   process.exit(0);
 };

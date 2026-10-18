@@ -1,7 +1,8 @@
 // Shapes returned by the core server's /api endpoints.
-import type { AgentDefinition } from "../../../src/agent/schema.ts";
+import type { AgentDefinition, AvatarLook } from "../../../src/agent/schema.ts";
+import type { Mood } from "@/components/Avatar";
 
-export type { AgentDefinition };
+export type { AgentDefinition, AvatarLook };
 export type Risk = "read_only" | "reversible" | "irreversible";
 
 export interface ToolInfo {
@@ -90,3 +91,19 @@ export interface Usage {
 }
 /** One streamed run event: { type, ...payload } as persisted by the core. */
 export type RunEvent = { type: string; [key: string]: any };
+
+/** One agent on the desktop overlay (from /api/presence). */
+export interface PresenceAvatar {
+  key: string;
+  rootRunId: string;
+  agent: string;
+  look: AvatarLook;
+  mood: Mood;
+  status: string;
+  depth: number;
+  leaving: boolean;
+}
+export interface PresenceState {
+  avatars: PresenceAvatar[];
+  hideForInput: boolean;
+}
