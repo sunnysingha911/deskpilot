@@ -88,10 +88,12 @@ data/            SQLite DBs (gitignored)
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
 - `npm run agent -- <agent> "<task>" --file <path>` attaches files (repeatable)
 - `npm run gui` (build UI + open window + desktop avatars; `-- --no-overlay` to skip them) · `npm run dev:ui` (Vite dev with reload) · `npm run build:ui` · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
+- `npm run tokens [-- --replay]` (token usage per agent; replay compares old vs new formatting)
 - `npm run logs -- [n]`, `npm test`, `npm run typecheck`, `npm run build:native`, `npm run notes-demo`
 
 ## Agent loop invariants
 - Provider adapters keep native history append-only (never edit earlier turns; keep thinking blocks).
+  One exception: stale observation results may be replaced by a marker (see Token invariants).
 - Tool calls run sequentially through the Executor; results for one turn go back in one message.
 - Untrusted tool output is wrapped in `<untrusted_data>` and any such tag inside it is escaped.
 - System prompt + tool list are deterministic so the prefix stays prompt-cached.
@@ -105,6 +107,20 @@ data/            SQLite DBs (gitignored)
   `prompt_eval_count` includes cached tokens; input = prompt_eval_count − prompt_eval_cached_count.
   effort → `think` (low = off). Only tool-capable models are offered. `/api/ps` reports
   context_length 4096 under the MLX runner even when the larger num_ctx is honored (verified).
+
+## Token invariants
+- Tool output goes to the model as one-line JSON plus long multi-line strings raw under `--- field ---`
+  (`renderOutput`), still inside `<untrusted_data>`. Results > 24k chars are spilled: start + end + a ref,
+  rest via the per-run `result.more` tool (offered when any tool has untrusted output).
+- Stale observations (`OBSERVATION_TOOLS`: browser.snapshot, ui.dump_tree, ui.find, screenshot) are pruned
+  in batches ≥ 8k tokens, keeping the newest per tool and the last 2 results; errors never pruned.
+  Anthropic: server-side context editing (`clear_tool_uses_20250919`, our history untouched). OpenAI/Ollama:
+  `pruneStale` on the adapter's history before each request. `RunDeps.prune: false` turns it off.
+  Pruning breaks the prompt cache once per batch: it pays off on long runs, roughly neutral on short ones.
+- Accessibility trees render with short refs (`u12`, `src/platform/refs.ts`, app-checked) instead of
+  paths, roles without "AX", no `_NS:` ids. Snapshots drop redundant `[cursor=pointer]`, unnamed wrappers
+  and the page's own origin. OpenAI requests carry `prompt_cache_key` (agent name).
+- Each run emits a `savings` event (estimates, chars/4); `npm run tokens [-- --replay]` reports usage.
 
 ## Delegation invariants
 - `agent.delegate` exists only for a run whose agent may call someone: `canDelegateTo`, plus user picks

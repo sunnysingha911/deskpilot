@@ -11,6 +11,7 @@
     "frontmost": "tsx scripts/frontmost-app.ts",
     "tool": "tsx scripts/tool.ts",
     "logs": "tsx scripts/logs.ts",
+    "tokens": "tsx scripts/tokens.ts",
     "build:native": "swift build -c release --package-path native/axhelper && swift build -c release --package-path native/overlay",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p ui/tsconfig.json",

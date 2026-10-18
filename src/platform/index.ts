@@ -1,8 +1,16 @@
 import { macosBackend } from "./macos.ts";
 import type { DesktopBackend } from "./types.ts";
 
+let testBackend: DesktopBackend | undefined;
+
+/** Tests only: route desktop calls to a fake backend (undefined restores the real one). */
+export function setBackendForTests(b: DesktopBackend | undefined): void {
+  testBackend = b;
+}
+
 /** Desktop backend for the current OS, or null if not implemented yet. */
 export function desktopBackend(): DesktopBackend | null {
+  if (testBackend) return testBackend;
   switch (process.platform) {
     case "darwin":
       return macosBackend;

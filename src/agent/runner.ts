@@ -17,7 +17,9 @@ import {
   type ParentLink,
 } from "./delegate.ts";
 import { needsAlwaysAsk, resolveTools, type AgentDefinition } from "./definition.ts";
-import { buildSystemPrompt, formatToolResult } from "./prompt.ts";
+import { DEFAULT_PRUNE, type PrunePolicy } from "../llm/prune.ts";
+import { makeResultMoreTool, RESULT_MORE_TOOL } from "../tools/result.ts";
+import { buildSystemPrompt, formatToolResult, SpillStore, type FormatStats } from "./prompt.ts";
 
 export type RunEvent =
   | { type: "start"; runId: string; tools: string[]; attachments?: string[] | undefined }
@@ -31,6 +33,8 @@ export type RunEvent =
   | { type: "delegate_end"; runId: string; agent: string; status: string; steps: number; error?: string | undefined }
   /** An event of a delegated (nested) run, forwarded into the parent's timeline. */
   | { type: "sub"; runId: string; agent: string; depth: number; event: RunEvent }
+  /** Context kept out of the model's input in this run (estimates; chars ≈ 4 per token). */
+  | { type: "savings"; compactTokens: number; spilledTokens: number; prunedTokens: number }
   | { type: "end"; summary: RunSummary };
 
 export interface RunDeps {
@@ -53,6 +57,8 @@ export interface RunDeps {
    * the set but read it with file.read only.
    */
   attachments?: { set: AttachmentSet; showToModel: boolean } | undefined;
+  /** Stale-observation pruning (default DEFAULT_PRUNE); false turns it off, e.g. to compare token use. */
+  prune?: PrunePolicy | false | undefined;
 }
 
 export interface RunResult extends RunSummary {
@@ -83,7 +89,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
   let blockedActions = 0;
   const started = Date.now();
 
-  const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL && t.name !== FILE_READ_TOOL);
+  const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL && t.name !== FILE_READ_TOOL && t.name !== RESULT_MORE_TOOL);
   const runTools: ToolDef[] = [];
   const att = deps.attachments?.set.files.length ? deps.attachments : undefined;
   // Images/PDFs the model can view go along with the task; everything stays readable with file.read.
@@ -112,6 +118,12 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     });
     if (delegateTool) runTools.push(delegateTool);
   }
+  // Very long results are shortened, with the rest readable through result.more (only offered
+  // when some tool can return content that long).
+  const spill = new SpillStore();
+  const stats: FormatStats = { compactChars: 0, spilledChars: 0 };
+  let prunedTokens = 0;
+  if ([...tools, ...runTools].some((t) => t.untrustedOutput)) runTools.push(makeResultMoreTool(spill));
   tools.push(...runTools);
   const executor = runTools.length ? deps.executor.withTools(runTools) : deps.executor;
   const allowed = new Set(tools.map((t) => t.name));
@@ -125,6 +137,8 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     }),
     maxTokensPerTurn: def.model.maxTokensPerTurn,
     effort: def.model.effort,
+    prune: deps.prune === false ? undefined : (deps.prune ?? DEFAULT_PRUNE),
+    cacheKey: def.name,
   });
 
   const firstText = att
@@ -175,6 +189,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
       usage.outputTokens += turn.usage.outputTokens;
       usage.cacheReadTokens += turn.usage.cacheReadTokens;
       usage.cacheWriteTokens += turn.usage.cacheWriteTokens;
+      prunedTokens += turn.prunedTokens ?? 0;
       if (turn.thinking) emit({ type: "thinking", text: turn.thinking });
       if (turn.text) emit({ type: "text", text: turn.text });
       emit({ type: "turn", step: steps, usage: turn.usage, servedBy: turn.servedBy });
@@ -232,7 +247,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
         );
         if (r.status === "blocked") blockedActions++;
         if (call.name === "plan.update" && r.ok) emit({ type: "plan", steps: (r.output as { steps: Extract<RunEvent, { type: "plan" }>["steps"] }).steps });
-        const formatted = formatToolResult(r);
+        const formatted = formatToolResult(r, { spill, stats });
         results.push({ id: call.id, ...formatted });
         emit({
           type: "tool_result",
@@ -250,6 +265,8 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     error = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
   }
 
+  const savings = { compactTokens: Math.round(stats.compactChars / 4), spilledTokens: Math.round(stats.spilledChars / 4), prunedTokens };
+  if (savings.compactTokens || savings.spilledTokens || savings.prunedTokens) emit({ type: "savings", ...savings });
   const summary: RunSummary = { status, steps, usage, finalText, error };
   deps.logger.finishRun(runId, { ...summary, transcript: session.transcript() });
   emit({ type: "end", summary });
@@ -320,6 +337,7 @@ function makeDelegateTool(
         parent: { runId: run.parentRunId, relation: "delegate" },
         delegation: { loadAgent: delegation.loadAgent, providerFor: delegation.providerFor, listAgents: delegation.listAgents, chain: childChain },
         attachments: run.deps.attachments && { set: run.deps.attachments.set, showToModel: false },
+        prune: run.deps.prune,
         // Nested runs' events already arrive wrapped; pass those through unchanged.
         onEvent: (e) => run.emit(e.type === "sub" ? e : { type: "sub", runId: childRunId, agent: target.name, depth, event: e }),
       });

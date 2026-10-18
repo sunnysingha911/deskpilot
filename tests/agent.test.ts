@@ -182,7 +182,8 @@ describe("agent loop", () => {
     assert.deepEqual(ran, []);
     assert.match(resultsOf(provider.inputs[1])[0]!.content, /tool_not_allowed/);
     assert.equal(logger.actionsFor(r.runId)[0]!.error, "tool_not_allowed");
-    assert.deepEqual(provider.opts!.tools.map((t) => t.name), ["test.read"]);
+    // result.more comes with any tool that can return long untrusted content.
+    assert.deepEqual(provider.opts!.tools.map((t) => t.name), ["test.read", "result.more"]);
   });
 
   test("multiple tool calls in one turn return together, in order", async () => {

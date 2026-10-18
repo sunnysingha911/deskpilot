@@ -3,6 +3,7 @@
 // (4096 here), which would silently truncate our system prompt + tool schemas.
 //
 // Keep num_ctx stable across requests: changing it makes Ollama reload the model (tens of seconds).
+import { pruneStale, prunedTokens, type ResultSlot } from "./prune.ts";
 import { omitInlineData } from "./redact.ts";
 import type { FileInputs, ModelProvider, ModelSession, ModelTurn, SessionOptions, ToolSchema, TurnInput } from "./types.ts";
 
@@ -109,6 +110,16 @@ class OllamaSession implements ModelSession {
       }
     }
 
+    let pruned = 0;
+    if (this.opts.prune) {
+      const slots: ResultSlot[] = [];
+      for (const m of this.messages) {
+        if (m.role === "tool") slots.push({ tool: this.fromWire.get(m.tool_name) ?? m.tool_name, content: m.content, set: (c) => (m.content = c) });
+      }
+      pruneStale(slots, this.opts.prune);
+      pruned = prunedTokens(slots);
+    }
+
     // Effort maps to Ollama's thinking switch (models without thinking ignore it).
     const think = this.opts.effort === undefined ? undefined : this.opts.effort !== "low";
     const res = await this.post({
@@ -171,6 +182,7 @@ class OllamaSession implements ModelSession {
         cacheWriteTokens: 0,
       },
       servedBy: res.model,
+      ...(pruned && { prunedTokens: pruned }),
     };
   }
 

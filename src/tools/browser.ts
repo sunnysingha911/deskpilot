@@ -170,6 +170,30 @@ export const browserOpen = defineTool({
     ),
 });
 
+/**
+ * Lossless-for-the-agent trimming of Playwright's AI snapshot: drops the "[cursor=pointer]" hint where
+ * the role already says the element is clickable (links, buttons…), unnamed "generic" wrapper lines (their children stay, so every ref an agent can
+ * act on is kept), and the page's own origin from same-site links.
+ */
+export function compactSnapshot(snap: string, pageUrl: string): string {
+  let origin = "";
+  try {
+    origin = new URL(pageUrl).origin;
+  } catch {
+    /* about:blank etc. */
+  }
+  return snap
+    .split("\n")
+    .filter((l) => !/^\s*- generic(?: \[active\])? \[ref=e\d+\]:$/.test(l))
+    .map((l) => {
+      // On a plain "generic" element the pointer cursor is the only sign it's clickable: keep it there.
+      let out = /^\s*- generic\b/.test(l) ? l : l.replace(/ \[cursor=pointer\]/g, "");
+      if (origin && /^\s*- \/url: /.test(out)) out = out.replace(`/url: ${origin}/`, "/url: /").replace(new RegExp(`/url: ${origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), "/url: /");
+      return out;
+    })
+    .join("\n");
+}
+
 export const browserSnapshot = defineTool({
   name: "browser.snapshot",
   description:
@@ -180,7 +204,7 @@ export const browserSnapshot = defineTool({
   untrustedOutput: true,
   run: (i) =>
     withPage(async (page) => {
-      const snap = await page.ariaSnapshot({ mode: "ai", ...(i.depth && { depth: i.depth }) });
+      const snap = compactSnapshot(await page.ariaSnapshot({ mode: "ai", ...(i.depth && { depth: i.depth }) }), page.url());
       return {
         url: page.url(),
         title: await page.title(),

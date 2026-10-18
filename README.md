@@ -80,6 +80,14 @@ npm test                                               # unit tests (no network,
 
 Irreversible tool calls prompt `y/N` in an interactive terminal and are denied otherwise.
 
+## Token use
+
+Agents keep their context small automatically: tool results are sent compactly, very long results
+are shortened (the agent reads the rest with `result.more` only if it needs it), screen trees use
+short element refs, and stale page snapshots / screen dumps are dropped from the conversation once a
+newer one exists (on Claude via Anthropic's server-side context editing). The timeline shows what
+each run saved; `npm run tokens` reports usage per agent (`-- --replay` re-measures logged outputs).
+
 ## Attaching files
 
 Drop files on the task box (or click **Attach files**) on the Run page, or pass `--file` on the CLI:

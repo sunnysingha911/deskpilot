@@ -1,5 +1,6 @@
 // OpenAI-compatible adapter: Chat Completions over plain fetch (no SDK).
 // Works with OpenAI, xAI Grok, Gemini's OpenAI endpoint, OpenRouter, and local Ollama / LM Studio.
+import { pruneStale, prunedTokens, type ResultSlot } from "./prune.ts";
 import { omitInlineData } from "./redact.ts";
 import type { FileInputs, InlineFile, ModelProvider, ModelSession, ModelTurn, SessionOptions, StopKind, ToolSchema, TurnInput } from "./types.ts";
 
@@ -79,6 +80,17 @@ class OpenAICompatibleSession implements ModelSession {
     this.fromWire = new Map(opts.tools.map((t) => [toWireName(t.name), t.name]));
   }
 
+  /** Tool results in the history, with their internal tool names (from the assistant's tool calls). */
+  private resultSlots(): ResultSlot[] {
+    const names = new Map<string, string>();
+    const slots: ResultSlot[] = [];
+    for (const m of this.messages) {
+      if (m.role === "assistant") for (const tc of m.tool_calls ?? []) names.set(tc.id, this.fromWire.get(tc.function.name) ?? tc.function.name);
+      if (m.role === "tool") slots.push({ tool: names.get(m.tool_call_id) ?? "", content: m.content, set: (c) => (m.content = c) });
+    }
+    return slots;
+  }
+
   private isOpenAI(): boolean {
     return new URL(this.cfg.baseUrl).hostname.endsWith("openai.com");
   }
@@ -133,6 +145,13 @@ class OpenAICompatibleSession implements ModelSession {
       for (const r of input.results) this.messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
     }
 
+    let pruned = 0;
+    if (this.opts.prune) {
+      const slots = this.resultSlots();
+      pruneStale(slots, this.opts.prune);
+      pruned = prunedTokens(slots);
+    }
+
     let res: WireResponse;
     try {
       res = await this.request();
@@ -144,7 +163,7 @@ class OpenAICompatibleSession implements ModelSession {
       last.content = (input as { text: string }).text + NO_IMAGES_NOTE;
       res = await this.request();
     }
-    return this.read(res);
+    return { ...this.read(res), ...(pruned && { prunedTokens: pruned }) };
   }
 
   private request(): Promise<WireResponse> {
@@ -157,6 +176,8 @@ class OpenAICompatibleSession implements ModelSession {
       ...(this.isOpenAI() ? { max_completion_tokens: this.opts.maxTokensPerTurn } : { max_tokens: this.opts.maxTokensPerTurn }),
       // OpenAI's Chat Completions rejects reasoning_effort together with tools (gpt-5.5), so only send it elsewhere.
       ...(effort && !(this.isOpenAI() && this.tools.length) && { reasoning_effort: effort }),
+      // Routes requests with the same prefix to the same cache (OpenAI only; others may reject unknown fields).
+      ...(this.opts.cacheKey && this.isOpenAI() && { prompt_cache_key: `deskpilot:${this.opts.cacheKey}` }),
     });
   }
 

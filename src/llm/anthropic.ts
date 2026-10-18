@@ -59,6 +59,27 @@ class AnthropicSession implements ModelSession {
     this.fromWire = new Map(opts.tools.map((t) => [toWireName(t.name), t.name]));
   }
 
+  /** Server-side clearing of stale observation results (context editing); our history stays intact. */
+  private contextManagement() {
+    const p = this.opts.prune;
+    if (!p) return undefined;
+    const observed = this.opts.tools.filter((t) => p.tools.includes(t.name));
+    if (!observed.length) return undefined;
+    const exclude = this.opts.tools.filter((t) => !p.tools.includes(t.name)).map((t) => toWireName(t.name));
+    return {
+      edits: [
+        {
+          type: "clear_tool_uses_20250919" as const,
+          trigger: { type: "input_tokens" as const, value: 20_000 },
+          keep: { type: "tool_uses" as const, value: p.keepLastResults },
+          clear_at_least: { type: "input_tokens" as const, value: p.minTokens },
+          ...(exclude.length && { exclude_tools: exclude }),
+          clear_tool_inputs: false,
+        },
+      ],
+    };
+  }
+
   async next(input: TurnInput): Promise<ModelTurn> {
     if (input.kind === "user") {
       this.messages.push({ role: "user", content: userContent(input.text, input.files) });
@@ -75,6 +96,7 @@ class AnthropicSession implements ModelSession {
       });
     }
 
+    const cm = this.contextManagement();
     const res = await this.client.beta.messages.create({
       model: this.opts.model,
       max_tokens: this.opts.maxTokensPerTurn,
@@ -86,7 +108,8 @@ class AnthropicSession implements ModelSession {
       thinking: { type: "adaptive", display: "summarized" },
       ...(this.opts.effort && { output_config: { effort: this.opts.effort } }),
       // On a policy decline, re-run server-side on Anthropic's recommended fallback model.
-      betas: ["server-side-fallback-2026-07-01"],
+      ...(cm && { context_management: cm }),
+      betas: ["server-side-fallback-2026-07-01", ...(cm ? ["context-management-2025-06-27"] : [])],
       fallbacks: "default",
     });
 
@@ -122,6 +145,7 @@ class AnthropicSession implements ModelSession {
         cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
       },
       servedBy: res.model,
+      prunedTokens: (res.context_management?.applied_edits ?? []).reduce((n, e) => n + (e.type === "clear_tool_uses_20250919" ? e.cleared_input_tokens : 0), 0) || undefined,
     };
   }
 

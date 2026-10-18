@@ -216,6 +216,18 @@ function EventItem({ ev }: { ev: RunEvent }) {
           step {ev.step} · in {fmtNum(ev.usage.inputTokens)} · cached {fmtNum(ev.usage.cacheReadTokens)} · out {fmtNum(ev.usage.outputTokens)} · {ev.servedBy}
         </div>
       );
+    case "savings": {
+      const parts = [
+        ev.prunedTokens > 0 && `${fmtNum(ev.prunedTokens)} by dropping stale screen/page dumps`,
+        ev.spilledTokens > 0 && `${fmtNum(ev.spilledTokens)} by shortening long results`,
+        ev.compactTokens > 0 && `${fmtNum(ev.compactTokens)} by compact formatting`,
+      ].filter(Boolean);
+      return (
+        <div className="px-1 text-xs text-ok" title="Estimated input tokens kept out of the model's context">
+          saved ~{fmtNum(ev.prunedTokens + ev.spilledTokens + ev.compactTokens)} tokens: {parts.join(" · ")}
+        </div>
+      );
+    }
     case "fallback":
       return (
         <Row tone="info" icon={<ArrowRightLeft />}>

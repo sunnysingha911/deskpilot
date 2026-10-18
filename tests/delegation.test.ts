@@ -361,7 +361,7 @@ describe("orchestrator building blocks", () => {
     assert.equal(r.status, "completed");
     assert.deepEqual(
       providers.get("orch")!.opts!.tools.map((t) => t.name),
-      ["plan.update", DELEGATE_TOOL],
+      ["plan.update", DELEGATE_TOOL, "result.more"],
     );
     const plans = events.filter((e) => e.type === "plan") as Array<Extract<RunEvent, { type: "plan" }>>;
     assert.deepEqual(
@@ -392,7 +392,7 @@ describe("declined actions can't be re-routed", () => {
     assert.deepEqual(asked, ["auditor:test.send:irreversible", "orch:agent.delegate:rule"]);
     assert.equal(providers.get("helper")!.inputs.length, 0, "the helper never ran");
     const first = resultsOf(providers.get("orch")!.inputs[1])[0]!;
-    assert.match(first.content, /"blockedActions": 1/);
+    assert.match(first.content, /"blockedActions":1/);
     assert.match(resultsOf(providers.get("orch")!.inputs[2])[0]!.content, /^BLOCKED/);
     assert.equal(r.blockedActions, 2);
   });

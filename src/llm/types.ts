@@ -1,5 +1,7 @@
 // Provider-neutral model interface. Each adapter (anthropic, openai-compatible, …) keeps the
-// conversation in its own native format, append-only, and exposes neutral turns to the agent loop.
+// conversation in its own native format, append-only (except pruning stale observations, see
+// prune.ts), and exposes neutral turns to the agent loop.
+import type { PrunePolicy } from "./prune.ts";
 
 export interface ToolSchema {
   /** Internal tool name, e.g. "ui.dump_tree". Adapters map it to whatever the provider allows. */
@@ -16,6 +18,10 @@ export interface SessionOptions {
   tools: ToolSchema[];
   maxTokensPerTurn: number;
   effort?: Effort | undefined;
+  /** Drop stale screen/page observations from the history (see src/llm/prune.ts). */
+  prune?: PrunePolicy | undefined;
+  /** Stable key for provider-side prompt caching (OpenAI prompt_cache_key), e.g. the agent name. */
+  cacheKey?: string | undefined;
 }
 
 export interface ToolResultInput {
@@ -71,6 +77,8 @@ export interface ModelTurn {
   usage: Usage;
   /** Model that actually produced the turn (may differ after a server-side fallback). */
   servedBy: string;
+  /** Input tokens this request didn't carry because stale observations were pruned (estimate for client-side pruning). */
+  prunedTokens?: number | undefined;
 }
 
 export interface ModelSession {

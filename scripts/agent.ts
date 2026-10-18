@@ -83,6 +83,9 @@ const print = (e: RunEvent, agent: AgentDefinition | string = def, depth = 0) =>
     case "tool_result":
       log(`  ${e.status === "ok" ? "✓" : e.status === "blocked" ? "⛔" : "✗"} ${e.status} · ${e.risk} · ${short(e.summary)}`);
       break;
+    case "savings":
+      log(dim(`  saved ~${e.prunedTokens + e.spilledTokens + e.compactTokens} input tokens (pruned ${e.prunedTokens} · shortened ${e.spilledTokens} · compact ${e.compactTokens})`));
+      break;
     case "turn":
       log(dim(`  [step ${e.step} · in ${e.usage.inputTokens} · cache read ${e.usage.cacheReadTokens} · write ${e.usage.cacheWriteTokens} · out ${e.usage.outputTokens} · ${e.servedBy}]`));
       break;
