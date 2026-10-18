@@ -24,6 +24,7 @@ export const applescriptRun = defineTool({
     timeoutMs: z.number().int().min(100).max(300_000).default(30_000),
   }),
   output: z.object({ result: z.string(), stderr: z.string(), durationMs: z.number() }),
+  desktop: true,
   baseRisk: "read_only",
   classify: (i) => classifyAppleScript(i.script),
   platforms: ["darwin"],

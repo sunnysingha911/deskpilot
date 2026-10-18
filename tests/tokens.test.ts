@@ -31,7 +31,7 @@ after(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-const ok = (tool: string, output: unknown, untrusted = true): ToolResult => ({ ok: true, status: "ok", tool, risk: "read_only", output, untrusted, logId: 1, durationMs: 1 });
+const ok = (tool: string, output: unknown, untrusted = true): ToolResult => ({ ok: true, status: "ok", tool, risk: "read_only", output, untrusted, logId: 1, durationMs: 1, waitedMs: 0 });
 
 describe("compact tool output", () => {
   test("one-line JSON, long multi-line text raw after it, no duplicate tree", () => {

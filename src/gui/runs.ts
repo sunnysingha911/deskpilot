@@ -1,5 +1,6 @@
 // Run manager for the GUI: starts runs, streams events, routes approvals to the window, handles stop
-// and provider fallback. One active run at a time, since desktop actions from two agents would collide.
+// and provider fallback. Several tasks run at once; their desktop actions take turns through the
+// desktop lock (src/core/desktop-lock.ts) and each has its own browser tab.
 import { listSet, setExists, type AttachmentSet } from "../core/attachments.ts";
 import { randomUUID } from "node:crypto";
 import { handoffTaskMessage, type ParentLink } from "../agent/delegate.ts";
@@ -7,6 +8,7 @@ import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../a
 import { newRunId, runAgent, type RunEvent } from "../agent/runner.ts";
 import { Executor, type ApprovalDecision, type ApprovalRequest, type Approver } from "../core/executor.ts";
 import type { ActionLogger } from "../core/logger.ts";
+import { endTask, type Priority, type RunMode, type TaskInfo } from "../core/task.ts";
 import { getConnection, isReady, keyIsSet, listConnections, loadSettings, toModelSpec, type Connection } from "../llm/connections.ts";
 import { createProvider } from "../llm/index.ts";
 import { availableTools } from "../tools/index.ts";
@@ -26,11 +28,32 @@ interface Pending {
 }
 
 interface Active {
-  /** First attempt's run id: stays the same across provider fallbacks (the avatar's key). */
+  /** First attempt's run id: stays the same across provider fallbacks (the avatar's key, the task id). */
   rootKey: string;
   runId: string;
+  agent: string;
+  task: string;
+  startedAt: string;
+  mode: RunMode;
+  priority: Priority;
   controller: AbortController;
   pending: Map<string, Pending>;
+  /** Settles when the task has finished (including cleanup). */
+  done?: Promise<void>;
+}
+
+/** Safety cap on tasks running at once (each one costs model calls). */
+export const MAX_ACTIVE_RUNS = 10;
+
+export interface ActiveRunView {
+  taskId: string;
+  runId: string;
+  agent: string;
+  task: string;
+  startedAt: string;
+  mode: RunMode;
+  priority: Priority;
+  pendingApprovals: number;
 }
 
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -52,6 +75,10 @@ export interface StartRequest {
   fromRun?: string | undefined;
   /** Upload folder id (POST /api/uploads) of the files attached to this task. */
   attachments?: string | undefined;
+  /** How this task shares the desktop with others (default "optimized"). */
+  mode?: RunMode | undefined;
+  /** Who gets the desktop first in optimized mode (default "normal"). */
+  priority?: Priority | undefined;
 }
 
 /** Provider for an agent called by another agent: its own connection, no fallback. */
@@ -64,7 +91,7 @@ export function providerForAgent(def: AgentDefinition) {
 }
 
 export class RunManager {
-  private active: Active | null = null;
+  private actives = new Map<string, Active>();
   private listeners = new Map<string, Set<(e: StreamedEvent) => void>>();
 
   constructor(
@@ -72,17 +99,47 @@ export class RunManager {
     private presence?: PresenceTracker,
   ) {}
 
+  /** The active task a run id belongs to (its current attempt or its first run id). */
+  private find(runId: string): Active | undefined {
+    for (const a of this.actives.values()) if (a.runId === runId || a.rootKey === runId) return a;
+    return undefined;
+  }
+
+  /** Most recently started active run (for older callers that expect one). */
   activeRunId(): string | null {
-    return this.active?.runId ?? null;
+    return [...this.actives.values()].at(-1)?.runId ?? null;
+  }
+
+  activeRuns(): ActiveRunView[] {
+    return [...this.actives.values()].map((a) => ({
+      taskId: a.rootKey,
+      runId: a.runId,
+      agent: a.agent,
+      task: a.task,
+      startedAt: a.startedAt,
+      mode: a.mode,
+      priority: a.priority,
+      pendingApprovals: a.pending.size,
+    }));
   }
 
   isActive(runId: string): boolean {
-    return this.active?.runId === runId;
+    return this.find(runId)?.runId === runId;
   }
 
   pendingApprovals(runId: string) {
-    if (!this.isActive(runId)) return [];
-    return [...this.active!.pending.entries()].map(([id, p]) => ({ id, ...p.req }));
+    const a = this.find(runId);
+    if (!a || a.runId !== runId) return [];
+    return [...a.pending.entries()].map(([id, p]) => ({ id, ...p.req }));
+  }
+
+  /** Change a running task's priority (takes effect at its next desktop turn). */
+  setPriority(runId: string, priority: Priority): boolean {
+    const a = this.find(runId);
+    if (!a) return false;
+    a.priority = priority;
+    this.publish(a.runId, { type: "priority", priority });
+    return true;
   }
 
   subscribe(runId: string, fn: (e: StreamedEvent) => void): () => void {
@@ -94,7 +151,7 @@ export class RunManager {
 
   private publish(runId: string, data: GuiEvent, id?: number): void {
     const eventId = id ?? this.logger.logRunEvent(runId, data);
-    this.presence?.apply(this.active?.rootKey ?? runId, data);
+    this.presence?.apply(this.find(runId)?.rootKey ?? runId, data);
     for (const fn of this.listeners.get(runId) ?? []) fn({ id: eventId, type: data.type, data });
   }
 
@@ -119,7 +176,9 @@ export class RunManager {
   }
 
   start(req: StartRequest): { runId: string } {
-    if (this.active) throw Object.assign(new Error(`run ${this.active.runId} is still in progress`), { status: 409 });
+    if (this.actives.size >= MAX_ACTIVE_RUNS) {
+      throw Object.assign(new Error(`${MAX_ACTIVE_RUNS} tasks are already running; stop one or wait for one to finish`), { status: 409 });
+    }
     const def = loadAgent(req.agent);
     const known = listAgents().map((a) => a.name);
     for (const n of req.with ?? []) if (!known.includes(n)) throw new Error(`unknown agent '${n}'`);
@@ -147,8 +206,19 @@ export class RunManager {
     if (!keyIsSet(firstConn) && attempts.length === 1) throw new Error(`${firstConn.label}: ${firstConn.keyEnv} is not set`);
 
     const runId = newRunId();
-    const active: Active = { rootKey: runId, runId, controller: new AbortController(), pending: new Map() };
-    this.active = active;
+    const active: Active = {
+      rootKey: runId,
+      runId,
+      agent: def.name,
+      task: req.task,
+      startedAt: new Date().toISOString(),
+      mode: req.mode ?? "optimized",
+      priority: req.priority ?? "normal",
+      controller: new AbortController(),
+      pending: new Map(),
+    };
+    this.actives.set(runId, active);
+    const taskInfo: TaskInfo = { id: runId, mode: active.mode, priority: () => active.priority };
     this.presence?.arrive(runId, runId, def.name, 0);
 
     const approver: Approver = (r) =>
@@ -170,7 +240,7 @@ export class RunManager {
         });
       });
 
-    void (async () => {
+    active.done = (async () => {
       let currentRunId = runId;
       try {
         for (let i = 0; i < attempts.length; i++) {
@@ -214,6 +284,7 @@ export class RunManager {
             parent,
             delegation: { loadAgent, providerFor: providerForAgent, userAllowed, listAgents: () => listAgents().map((a) => a.name) },
             signal: active.controller.signal,
+            task: taskInfo,
             onEvent: (e, id) => this.publish(currentRunId, e, id),
             attachments: attachmentSet && { set: attachmentSet, showToModel: true },
           });
@@ -228,29 +299,42 @@ export class RunManager {
         this.publish(currentRunId, { type: "end", summary: { status: "error", steps: 0, error: err instanceof Error ? err.message : String(err) } });
       } finally {
         for (const [id] of active.pending) this.decide(active.runId, id, false, "policy:run-ended");
+        await endTask(taskInfo.id); // e.g. close the task's browser tabs
         this.publish(currentRunId, { type: "closed" });
-        this.active = null;
+        this.actives.delete(active.rootKey);
       }
     })();
 
     return { runId };
   }
 
+  /** Stop every task (pending approvals are denied) and wait for them to wind down, so none stays "running". */
+  async shutdown(timeoutMs = 5000): Promise<void> {
+    const all = [...this.actives.values()];
+    for (const a of all) {
+      a.controller.abort();
+      for (const [id] of a.pending) this.decide(a.runId, id, false, "policy:shutdown");
+    }
+    await Promise.race([Promise.allSettled(all.map((a) => a.done)), new Promise((r) => setTimeout(r, timeoutMs))]);
+  }
+
   decide(runId: string, approvalId: string, approved: boolean, by = "user:gui"): boolean {
-    if (!this.active || this.active.runId !== runId) return false;
-    const p = this.active.pending.get(approvalId);
+    const a = this.find(runId);
+    if (!a || a.runId !== runId) return false;
+    const p = a.pending.get(approvalId);
     if (!p) return false;
     clearTimeout(p.timer);
-    this.active.pending.delete(approvalId);
+    a.pending.delete(approvalId);
     p.resolve({ approved, by });
     this.publish(runId, { type: "approval_resolved", id: approvalId, approved, by });
     return true;
   }
 
   stop(runId: string): boolean {
-    if (!this.active || this.active.runId !== runId) return false;
-    this.active.controller.abort();
-    for (const [id] of this.active.pending) this.decide(runId, id, false, "policy:stopped");
+    const a = this.find(runId);
+    if (!a || a.runId !== runId) return false;
+    a.controller.abort();
+    for (const [id] of a.pending) this.decide(runId, id, false, "policy:stopped");
     this.publish(runId, { type: "stopping" });
     return true;
   }

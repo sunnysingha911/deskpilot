@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Risk } from "./risk.ts";
+import type { TaskInfo } from "./task.ts";
 
 export type Platform = NodeJS.Platform;
 
@@ -10,6 +11,8 @@ export interface ToolContext {
   /** Agents that led to this call, outermost first, ending with the caller (["mac-helper", "coder"]). */
   chain?: string[];
   signal?: AbortSignal;
+  /** The task this call belongs to (desktop turn-taking, per-task browser tab). Missing = a one-off call. */
+  task?: TaskInfo;
 }
 
 export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = z.ZodType> {
@@ -24,6 +27,8 @@ export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = 
    */
   baseRisk: Risk;
   classify?: (input: z.infer<I>, ctx: ToolContext) => Risk | Promise<Risk>;
+  /** Drives the real screen/keyboard/mouse: runs one at a time across tasks (see desktop-lock.ts). */
+  desktop?: boolean;
   /** OSes where this tool is available. Omitted = all. */
   platforms?: Platform[];
   /** false = never given to agents (still runnable by hand). Default true. */

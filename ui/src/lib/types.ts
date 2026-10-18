@@ -11,9 +11,23 @@ export interface ToolInfo {
   baseRisk: Risk;
   agentVisible: boolean;
 }
+export type Priority = "high" | "normal" | "low";
+export type RunMode = "optimized" | "parallel";
+/** A task running right now (from /api/meta). */
+export interface ActiveRun {
+  taskId: string;
+  runId: string;
+  agent: string;
+  task: string;
+  startedAt: string;
+  mode: RunMode;
+  priority: Priority;
+  pendingApprovals: number;
+}
 export interface Meta {
   os: string;
   activeRunId: string | null;
+  activeRuns: ActiveRun[];
   tools: ToolInfo[];
 }
 export interface Connection {

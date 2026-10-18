@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Bot, History, Play, Plug, ScrollText } from "lucide-react";
+import { useEffect } from "react";
 import { Link, NavLink, Outlet } from "react-router";
 import { get } from "@/lib/api";
 import type { Meta } from "@/lib/types";
@@ -14,7 +15,7 @@ const NAV = [
 ];
 
 export function useMeta() {
-  return useQuery({ queryKey: ["meta"], queryFn: () => get<Meta>("/api/meta"), refetchInterval: 5000 });
+  return useQuery({ queryKey: ["meta"], queryFn: () => get<Meta>("/api/meta"), refetchInterval: 2000 });
 }
 
 export function Layout() {
@@ -44,13 +45,7 @@ export function Layout() {
           ) : meta.data ? (
             <>
               <div>OS: {meta.data.os}</div>
-              {meta.data.activeRunId ? (
-                <Link className="text-warn hover:underline" to={`/runs/${meta.data.activeRunId}`}>
-                  ● run in progress
-                </Link>
-              ) : (
-                <div>idle</div>
-              )}
+              <RunningSummary runs={meta.data.activeRuns ?? []} />
             </>
           ) : null}
         </div>
@@ -58,6 +53,27 @@ export function Layout() {
       <main className="overflow-auto px-8 pt-6 pb-12">
         <Outlet />
       </main>
+    </div>
+  );
+}
+
+/** "3 running", plus a warning for tasks waiting for approval (each links to its run). */
+function RunningSummary({ runs }: { runs: Meta["activeRuns"] }) {
+  const waiting = runs.filter((r) => r.pendingApprovals > 0);
+  useEffect(() => {
+    document.title = waiting.length ? `⚠️ ${waiting.length === 1 ? "Approval" : `${waiting.length} approvals`} needed · deskpilot` : runs.length ? `${runs.length} running · deskpilot` : "deskpilot";
+  }, [waiting.length, runs.length]);
+  if (!runs.length) return <div>idle</div>;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <Link className="text-warn hover:underline" to="/run">
+        ● {runs.length} running
+      </Link>
+      {waiting.map((r) => (
+        <Link key={r.runId} className="font-medium text-bad hover:underline" to={`/runs/${r.runId}`}>
+          ⚠ {r.agent} needs your OK
+        </Link>
+      ))}
     </div>
   );
 }

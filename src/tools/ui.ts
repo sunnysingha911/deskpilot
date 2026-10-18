@@ -99,6 +99,7 @@ export const uiPress = defineTool({
     "Perform an accessibility action (default AXPress = click) on an element, addressed by path or selector. Buttons labelled like Send/Delete/Buy/Submit require user approval.",
   input: Target.safeExtend({ action: z.string().default("AXPress") }),
   output: z.object({ app: AppInfo, element: UIElement, action: z.string() }),
+  desktop: true,
   baseRisk: "reversible",
   async classify(i) {
     const { element } = await requireBackend().inspect(prepTarget(i));
@@ -118,6 +119,7 @@ export const uiSetValue = defineTool({
     sensitive: z.boolean().default(false).describe("Don't store the value in the action log"),
   }),
   output: z.object({ app: AppInfo, element: UIElement, verified: z.boolean() }),
+  desktop: true,
   baseRisk: "reversible",
   platforms: DESKTOP_PLATFORMS,
   untrustedOutput: true,

@@ -11,6 +11,7 @@ import { chromium, type Browser, type Locator, type Page } from "playwright-core
 import { z } from "zod";
 import { DATA_DIR, ensureDir } from "../core/paths.ts";
 import { riskFromLabel, type Risk } from "../core/risk.ts";
+import { onTaskEnd, type TaskInfo } from "../core/task.ts";
 import { defineTool, ToolError } from "../core/tool.ts";
 
 const CDP_PORT = Number(process.env.BROWSER_CDP_PORT ?? 9333);
@@ -70,15 +71,73 @@ async function ensureBrowserRunning(): Promise<void> {
   throw new ToolError("browser_start_failed", `browser did not open DevTools port ${CDP_PORT} within 10s`);
 }
 
-/** Connect, run fn against the active tab, disconnect (the browser keeps running). */
-async function withPage<T>(fn: (page: Page, browser: Browser) => Promise<T>, opts: { launch?: boolean; newTab?: boolean } = {}): Promise<T> {
+// Tasks running at the same time each get their own tab (remembered by CDP target id, since every
+// call connects afresh); the tabs close when the task ends. Calls outside a task use the last tab.
+const taskTabs = new Map<string, string[]>();
+
+async function targetIdOf(page: Page): Promise<string> {
+  const s = await page.context().newCDPSession(page);
+  try {
+    const { targetInfo } = (await s.send("Target.getTargetInfo")) as { targetInfo: { targetId: string } };
+    return targetInfo.targetId;
+  } finally {
+    await s.detach().catch(() => {});
+  }
+}
+
+/** The task's current tab (its newest), or a new one when asked or when it has none left. */
+async function taskPage(task: TaskInfo, pages: Page[], newPage: () => Promise<Page>, newTab: boolean): Promise<Page> {
+  const ids = taskTabs.get(task.id) ?? [];
+  if (!newTab && ids.length) {
+    const live = new Map<string, Page>();
+    for (const p of pages) live.set(await targetIdOf(p).catch(() => ""), p);
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const p = live.get(ids[i]!);
+      if (p) return p;
+    }
+  }
+  const page = await newPage();
+  if (!taskTabs.has(task.id)) onTaskEnd(task.id, () => closeTaskTabs(task.id));
+  taskTabs.set(task.id, [...ids, await targetIdOf(page)]);
+  return page;
+}
+
+/** Close the tabs a task opened (the browser and other tasks' tabs stay). */
+export async function closeTaskTabs(taskId: string): Promise<number> {
+  const ids = taskTabs.get(taskId) ?? [];
+  taskTabs.delete(taskId);
+  if (!ids.length || !(await cdpAlive())) return 0;
+  const browser = await chromium.connectOverCDP(CDP_URL, { timeout: 10_000 });
+  let closed = 0;
+  try {
+    for (const p of browser.contexts().flatMap((c) => c.pages())) {
+      if (ids.includes(await targetIdOf(p).catch(() => ""))) {
+        await p.close().catch(() => {});
+        closed++;
+      }
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
+  return closed;
+}
+
+/** Connect, run fn against the task's tab (or the last tab), disconnect (the browser keeps running). */
+async function withPage<T>(
+  fn: (page: Page, browser: Browser) => Promise<T>,
+  opts: { launch?: boolean; newTab?: boolean; task?: TaskInfo | undefined } = {},
+): Promise<T> {
   if (opts.launch) await ensureBrowserRunning();
   else if (!(await cdpAlive())) throw new ToolError("browser_not_open", "No browser session. Call browser.open first.");
   const browser = await chromium.connectOverCDP(CDP_URL, { timeout: 10_000 });
   try {
     const ctx = browser.contexts()[0] ?? (await browser.newContext());
     const pages = ctx.pages();
-    const page = opts.newTab || pages.length === 0 ? await ctx.newPage() : pages[pages.length - 1]!;
+    const page = opts.task
+      ? await taskPage(opts.task, pages, () => ctx.newPage(), !!opts.newTab)
+      : opts.newTab || pages.length === 0
+        ? await ctx.newPage()
+        : pages[pages.length - 1]!;
     page.setDefaultTimeout(10_000);
     return await fn(page, browser);
   } finally {
@@ -151,7 +210,7 @@ const PageInfo = z.object({ url: z.string(), title: z.string() });
 export const browserOpen = defineTool({
   name: "browser.open",
   description:
-    "Open a URL in the agent's dedicated browser (isolated profile). Starts the browser if needed. Reuses the current tab unless newTab is true.",
+    "Open a URL in the agent's dedicated browser (isolated profile). Starts the browser if needed. Reuses this task's tab unless newTab is true (other tasks have their own tabs).",
   input: z.object({
     url: z.string().url(),
     newTab: z.boolean().default(false),
@@ -160,13 +219,13 @@ export const browserOpen = defineTool({
   output: PageInfo,
   baseRisk: "reversible",
   untrustedOutput: true,
-  run: (i) =>
+  run: (i, ctx) =>
     withPage(
       async (page) => {
         await page.goto(i.url, { waitUntil: i.waitUntil, timeout: 30_000 });
         return { url: page.url(), title: await page.title() };
       },
-      { launch: true, newTab: i.newTab },
+      { launch: true, newTab: i.newTab, task: ctx.task },
     ),
 });
 
@@ -202,7 +261,7 @@ export const browserSnapshot = defineTool({
   output: PageInfo.extend({ snapshot: z.string(), truncated: z.boolean() }),
   baseRisk: "read_only",
   untrustedOutput: true,
-  run: (i) =>
+  run: (i, ctx) =>
     withPage(async (page) => {
       const snap = compactSnapshot(await page.ariaSnapshot({ mode: "ai", ...(i.depth && { depth: i.depth }) }), page.url());
       return {
@@ -211,7 +270,7 @@ export const browserSnapshot = defineTool({
         snapshot: snap.length > i.maxChars ? snap.slice(0, i.maxChars) + "\n…[truncated]" : snap,
         truncated: snap.length > i.maxChars,
       };
-    }),
+    }, { task: ctx.task }),
 });
 
 export const browserClick = defineTool({
@@ -221,16 +280,16 @@ export const browserClick = defineTool({
   input: ElementTarget,
   output: PageInfo.extend({ clicked: z.object({ tag: z.string(), text: z.string() }) }),
   baseRisk: "reversible",
-  classify: (i) => withPage(async (page) => classifyBrowserClick(await describeElement(await locate(page, i)))),
+  classify: (i, ctx) => withPage(async (page) => classifyBrowserClick(await describeElement(await locate(page, i))), { task: ctx.task }),
   untrustedOutput: true,
-  run: (i) =>
+  run: (i, ctx) =>
     withPage(async (page) => {
       const loc = await locate(page, i);
       const facts = await describeElement(loc);
       await loc.click();
       await page.waitForLoadState("domcontentloaded").catch(() => {});
       return { url: page.url(), title: await page.title(), clicked: { tag: facts.tag, text: facts.text } };
-    }),
+    }, { task: ctx.task }),
 });
 
 export const browserFill = defineTool({
@@ -244,23 +303,24 @@ export const browserFill = defineTool({
   baseRisk: "reversible",
   untrustedOutput: true,
   redactInput: (i) => (i.sensitive ? { ...i, value: `[redacted ${i.value.length} chars]` } : i),
-  run: (i) =>
+  run: (i, ctx) =>
     withPage(async (page) => {
       const loc = await locate(page, i);
       await loc.fill(i.value);
       const now = await loc.inputValue().catch(() => null);
       return { url: page.url(), title: await page.title(), verified: now === null ? false : now === i.value };
-    }),
+    }, { task: ctx.task }),
 });
 
 export const browserClose = defineTool({
   name: "browser.close",
-  description: "Close the agent's dedicated browser (all its tabs).",
+  description: "Close this task's browser tabs (other tasks' tabs stay open). Outside a task, closes the whole dedicated browser.",
   input: z.object({}),
   output: z.object({ closed: z.boolean() }),
   baseRisk: "reversible",
   untrustedOutput: false,
-  async run() {
+  async run(_i, ctx) {
+    if (ctx.task) return { closed: (await closeTaskTabs(ctx.task.id)) > 0 };
     if (!(await cdpAlive())) return { closed: false };
     const browser = await chromium.connectOverCDP(CDP_URL);
     const session = await browser.newBrowserCDPSession();

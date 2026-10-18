@@ -86,7 +86,8 @@ data/            SQLite DBs (gitignored)
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
-- `npm run agent -- <agent> "<task>" --file <path>` attaches files (repeatable)
+- `npm run agent -- <agent> "<task>" --file <path>` attaches files (repeatable); `--mode optimized|parallel`,
+  `--priority high|normal|low`
 - `npm run gui` (build UI + open window + desktop avatars; `-- --no-overlay` to skip them) · `npm run dev:ui` (Vite dev with reload) · `npm run build:ui` · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
 - `npm run tokens [-- --replay]` (token usage per agent; replay compares old vs new formatting)
 - `npm run logs -- [n]`, `npm test`, `npm run typecheck`, `npm run build:native`, `npm run notes-demo`
@@ -107,6 +108,20 @@ data/            SQLite DBs (gitignored)
   `prompt_eval_count` includes cached tokens; input = prompt_eval_count − prompt_eval_cached_count.
   effort → `think` (low = off). Only tool-capable models are offered. `/api/ps` reports
   context_length 4096 under the MLX runner even when the larger num_ctx is honored (verified).
+
+## Parallel task invariants
+- A task = a top-level run + its delegations/fallbacks; `TaskInfo {id, mode, priority()}` (src/core/task.ts)
+  flows through RunDeps → ToolContext. Mode: `optimized` (default) | `parallel`; priority high|normal|low,
+  changeable while running (`POST /api/runs/:id/priority`). `/api/meta.activeRuns` lists running tasks.
+- Tools with `desktop: true` (input.*, ui.press, ui.set_value, applescript.run) run one at a time through
+  `DesktopLock` (src/core/desktop-lock.ts), across processes too via `data/desktop.lock` (pid; a dead
+  holder's lock is taken over). Optimized tasks keep a lease (LEASE_MS 5s, capped by MAX_STRETCH_MS 30s
+  while others wait; a higher priority may take over); waiters go by priority (optimized only), then
+  arrival. Parallel tasks hold nothing between actions. Everything else runs concurrently.
+- Each task gets its own browser tab (tracked by CDP target id), closed by `endTask` when the task
+  ends; browser.close inside a task closes only its tabs.
+- Time waiting for approval or the desktop (`ToolResult.waitedMs`) is excluded from time budgets.
+- Server shutdown stops every task (approvals denied) and waits for them, so none stays "running".
 
 ## Token invariants
 - Tool output goes to the model as one-line JSON plus long multi-line strings raw under `--- field ---`
@@ -134,7 +149,7 @@ data/            SQLite DBs (gitignored)
 - `runs.parent_run_id` + `relation` ("delegate" | "handoff") link runs. Nested events are persisted
   under the child run and forwarded to the parent as `{type:"sub", runId, agent, depth, event}`.
 - Approvals carry `chain`; in the GUI they surface on the top-level run (with `subRunId`).
-- Desktop actions never run in parallel: delegation is synchronous inside the one active run.
+- Delegation is synchronous inside its task; several tasks run in parallel (see Parallel task invariants).
 - `canDelegateTo: ["*"]` = every other agent. An agent may have no tools only if it can delegate.
 - A declined action must not be re-routed: once any action in a run (or a run it called) is blocked,
   every further `agent.delegate` call in that run needs approval. Results report `blockedActions`.
@@ -173,7 +188,7 @@ data/            SQLite DBs (gitignored)
 - UI talks to the core only over HTTP/SSE with the token, so a desktop shell can host it unchanged.
 - UI deps are devDependencies (bundled at build time); core runtime deps stay minimal.
 - API keys are write-only: the API reports keySet booleans and never returns key values.
-- One active run at a time. Provider fallback only when a run fails before its first step
+- Several tasks at once (cap `MAX_ACTIVE_RUNS` = 10, no queue). Provider fallback only when a run fails before its first step
   (so no tool has run) and only when the user didn't pick a provider explicitly.
 - Every run event is persisted in `run_events`, so history replays the same timeline as live view.
 

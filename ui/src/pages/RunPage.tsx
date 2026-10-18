@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Forward, Play, Square, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Eye, Forward, Play, Plus, Square, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { parseMentions } from "../../../src/agent/schema.ts";
 import { AttachmentPicker, NO_ATTACHMENTS, type AttachmentState } from "@/components/Attachments";
@@ -15,7 +15,8 @@ import { Input, NativeSelect, Textarea } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { api, get } from "@/lib/api";
-import type { AgentDefinition, ProvidersView, RunDetail } from "@/lib/types";
+import type { ActiveRun, AgentDefinition, Priority, ProvidersView, RunDetail, RunMode } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { modelCache } from "@/pages/ProvidersPage";
 
 export const ownConnection = (a: AgentDefinition) =>
@@ -35,20 +36,22 @@ export function RunPage() {
   const [runId, setRunId] = useState<string | null>(null);
   const [withAgents, setWithAgents] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<AttachmentState>(NO_ATTACHMENTS);
+  const [mode, setMode] = useState<RunMode>(() => (localStorage.getItem("deskpilot-run-mode") as RunMode | null) ?? "optimized");
+  const [priority, setPriority] = useState<Priority>("normal");
   // "Send to agent…" on a finished run opens this page with ?from=<runId>.
   const [params, setParams] = useSearchParams();
   const fromRun = params.get("from");
   const from = useQuery({ queryKey: ["run", fromRun], queryFn: () => get<RunDetail>(`/api/runs/${fromRun}`), enabled: !!fromRun });
 
-  // Re-attach to a run that is already in progress (e.g. after reopening the window).
+  // Watch a run that is already in progress (e.g. after reopening the window).
   useEffect(() => {
     if (!runId && meta.data?.activeRunId) setRunId(meta.data.activeRunId);
   }, [meta.data?.activeRunId, runId]);
+  const activeRuns = meta.data?.activeRuns ?? [];
 
   const list = agents.data ?? [];
   const selected = list.find((a) => a.name === agent) ?? list[0];
   const stream = useRunEvents(runId);
-  const running = !!runId && !stream.done;
 
   const start = useMutation({
     mutationFn: () =>
@@ -60,29 +63,45 @@ export function RunPage() {
         with: withAgents.filter((n) => n !== selected!.name && list.some((a) => a.name === n)),
         fromRun: fromRun || undefined,
         attachments: attachments.files.length ? attachments.set : undefined,
+        mode,
+        priority,
       }),
     onSuccess: ({ runId }) => {
       localStorage.setItem("deskpilot-last-agent", selected!.name);
       setRunId(runId);
-      // The files now belong to that run; the next task starts with a fresh set.
-      setAttachments(NO_ATTACHMENTS);
+      // The form is ready for the next task straight away (the files now belong to that run).
+      clearForm();
+      toast(`Started ${selected!.name}. You can start another task now: it runs alongside.`);
       qc.invalidateQueries({ queryKey: ["meta"] });
     },
     onError: (e) => toast((e as Error).message, true),
   });
+  const taskBox = useRef<HTMLTextAreaElement>(null);
+  function clearForm() {
+    setTask("");
+    setAttachments(NO_ATTACHMENTS);
+    setWithAgents([]);
+    if (fromRun) setParams({});
+  }
+  const newTask = () => {
+    clearForm();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    taskBox.current?.focus();
+  };
+
   const stop = useMutation({
-    mutationFn: () => api("POST", `/api/runs/${stream.currentRunId}/stop`),
+    mutationFn: (id: string) => api("POST", `/api/runs/${id}/stop`),
+    onError: (e) => toast((e as Error).message, true),
+  });
+  const changePriority = useMutation({
+    mutationFn: (v: { runId: string; priority: Priority }) => api("POST", `/api/runs/${v.runId}/priority`, { priority: v.priority }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["meta"] }),
     onError: (e) => toast((e as Error).message, true),
   });
 
   useEffect(() => {
     if (stream.done) qc.invalidateQueries({ queryKey: ["meta"] });
   }, [stream.done, qc]);
-  useEffect(() => {
-    const resolved = new Set(stream.events.filter((e) => e.type === "approval_resolved").map((e) => `${e._runId}:${e.id}`));
-    const pending = stream.events.some((e) => e.type === "approval_request" && !resolved.has(`${e._runId}:${e.id}`));
-    document.title = pending ? "⚠️ Approval needed · deskpilot" : "deskpilot";
-  }, [stream.events]);
 
   const others = list.filter((a) => a.name !== selected?.name);
   const mentioned = useMemo(() => parseMentions(task, list.map((a) => a.name), selected?.name), [task, list, selected?.name]);
@@ -106,11 +125,19 @@ export function RunPage() {
 
   return (
     <>
-      <PageHeader title="Run a task" sub="Pick an agent, optionally choose which AI runs it, and watch every step. Irreversible actions wait for your approval here." />
+      <PageHeader
+        title="Run a task"
+        sub="Pick an agent and start a task. Start as many as you like: they run side by side, listed under Running now. Irreversible actions wait for your approval here."
+        actions={
+          <Button variant="outline" onClick={newTask} title="Clear the form to start another task (running tasks keep going)">
+            <Plus /> New task
+          </Button>
+        }
+      />
       <Card>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <Field label="Agent">
-            <NativeSelect value={selected?.name} onChange={(e) => setAgent(e.target.value)} disabled={running}>
+            <NativeSelect value={selected?.name} onChange={(e) => setAgent(e.target.value)}>
               {list.map((a) => (
                 <option key={a.name} value={a.name}>
                   {a.name}
@@ -119,7 +146,7 @@ export function RunPage() {
             </NativeSelect>
           </Field>
           <Field label="AI provider">
-            <NativeSelect value={connection} onChange={(e) => setConnection(e.target.value)} disabled={running}>
+            <NativeSelect value={connection} onChange={(e) => setConnection(e.target.value)}>
               <option value="">Agent default ({selected ? `${ownConnection(selected)} · ${selected.model.id}` : "…"})</option>
               {prov.data?.connections
                 .filter((c) => c.enabled)
@@ -133,7 +160,7 @@ export function RunPage() {
             </NativeSelect>
           </Field>
           <Field label="Model">
-            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="optional override" list="run-models" disabled={running} />
+            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="optional override" list="run-models" />
             <datalist id="run-models">
               {models.map((m) => (
                 <option key={m} value={m} />
@@ -157,14 +184,15 @@ export function RunPage() {
               . Its final answer is passed to the agent as data, after your task.
               {from.data?.run.final_text && <div className="mt-1 line-clamp-3 text-xs whitespace-pre-wrap text-muted-foreground">{from.data.run.final_text}</div>}
             </div>
-            <button className="cursor-pointer text-muted-foreground hover:text-foreground" title="Don't pass it on" onClick={() => setParams({})} disabled={running}>
+            <button className="cursor-pointer text-muted-foreground hover:text-foreground" title="Don't pass it on" onClick={() => setParams({})}>
               <X className="size-4" />
             </button>
           </div>
         )}
         <Field label="Task" className="mt-4">
-          <AttachmentPicker value={attachments} onChange={setAttachments} disabled={running || start.isPending} onError={(m) => toast(m, true)}>
+          <AttachmentPicker value={attachments} onChange={setAttachments} disabled={start.isPending} onError={(m) => toast(m, true)}>
             <Textarea
+              ref={taskBox}
               value={task}
               onChange={(e) => setTask(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && submit()}
@@ -185,7 +213,7 @@ export function RunPage() {
                   <label key={a.name} className="flex cursor-pointer items-center gap-1.5 text-sm" title={a.description}>
                     <Checkbox
                       checked={on}
-                      disabled={always || viaMention || running}
+                      disabled={always || viaMention}
                       onCheckedChange={(v) => setWithAgents((w) => (v ? [...new Set([...w, a.name])] : w.filter((n) => n !== a.name)))}
                     />
                     <span className="font-mono text-[13px]">{a.name}</span>
@@ -197,28 +225,119 @@ export function RunPage() {
             </div>
           </div>
         )}
-        <div className="mt-4 flex items-center gap-2">
-          <Button onClick={submit} disabled={running || start.isPending}>
-            <Play /> Start
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button onClick={submit} disabled={start.isPending}>
+            <Play /> {activeRuns.length ? "Start another task" : "Start task"}
           </Button>
-          {running && (
-            <Button variant="destructive" onClick={() => stop.mutate()} disabled={stop.isPending}>
-              <Square /> Stop
-            </Button>
-          )}
-          <span className="text-xs text-muted-foreground">⌘↩ to start</span>
-          {runId && (
-            <Link className="ml-auto text-xs text-primary hover:underline" to={`/runs/${stream.currentRunId ?? runId}`}>
-              open in Runs
-            </Link>
-          )}
+          <ModeSwitch
+            value={mode}
+            onChange={(m) => {
+              setMode(m);
+              localStorage.setItem("deskpilot-run-mode", m);
+            }}
+          />
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title={mode === "parallel" ? "Priority only matters in Optimized mode" : "Who gets the screen, keyboard and mouse first"}>
+            Priority
+            <NativeSelect value={priority} onChange={(e) => setPriority(e.target.value as Priority)} className="h-8 w-28 text-xs" disabled={mode === "parallel"}>
+              <option value="high">High</option>
+              <option value="normal">Normal</option>
+              <option value="low">Low</option>
+            </NativeSelect>
+          </label>
+          <span className="text-xs text-muted-foreground">⌘↩ to start · tasks run side by side</span>
         </div>
       </Card>
+      <RunningNow
+        runs={activeRuns}
+        watching={stream.currentRunId ?? runId}
+        onWatch={setRunId}
+        onStop={(id) => stop.mutate(id)}
+        onPriority={(id, p) => changePriority.mutate({ runId: id, priority: p })}
+      />
       {runId && (
         <div className="mt-4">
+          <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+            <Eye className="size-3.5" /> Watching {stream.done ? "finished run" : "run"} {stream.currentRunId ?? runId}
+            <Link className="ml-auto text-primary hover:underline" to={`/runs/${stream.currentRunId ?? runId}`}>
+              open in Runs
+            </Link>
+          </div>
           <Timeline events={stream.events} />
         </div>
       )}
     </>
+  );
+}
+
+const MODE_HELP: Record<RunMode, string> = {
+  optimized: "Runs alongside other tasks; when it uses the screen, keyboard or mouse it keeps them for a few seconds so its steps aren't interrupted. Priority decides who goes first.",
+  parallel: "Runs alongside other tasks with no holding: each screen/keyboard/mouse action takes its turn on its own. Fastest; best for shell, browser and thinking-heavy tasks.",
+};
+
+function ModeSwitch({ value, onChange }: { value: RunMode; onChange: (m: RunMode) => void }) {
+  return (
+    <div className="inline-flex rounded-md border p-0.5" role="radiogroup" aria-label="Run mode">
+      {(["optimized", "parallel"] as const).map((m) => (
+        <button
+          key={m}
+          type="button"
+          role="radio"
+          aria-checked={value === m}
+          title={MODE_HELP[m]}
+          onClick={() => onChange(m)}
+          className={cn("cursor-pointer rounded px-2.5 py-1 text-xs capitalize", value === m ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Every task running right now: watch it, change its priority, stop it. */
+function RunningNow({
+  runs,
+  watching,
+  onWatch,
+  onStop,
+  onPriority,
+}: {
+  runs: ActiveRun[];
+  watching: string | null;
+  onWatch: (runId: string) => void;
+  onStop: (runId: string) => void;
+  onPriority: (runId: string, p: Priority) => void;
+}) {
+  return (
+    <Card className="mt-4 py-3">
+      <div className="mb-2 text-xs font-medium text-muted-foreground">Running now · {runs.length}</div>
+      {!runs.length && <p className="px-2 text-sm text-muted-foreground">Nothing running. Every task you start appears here and runs alongside the others.</p>}
+      <div className="flex flex-col gap-1">
+        {runs.map((r) => (
+          <div key={r.taskId} className={cn("flex items-center gap-2 rounded-md px-2 py-1.5 text-sm", watching === r.runId && "bg-accent/60")}>
+            <button type="button" className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left" onClick={() => onWatch(r.runId)} title="Watch this task">
+              <b className="shrink-0">{r.agent}</b>
+              <span className="truncate text-xs text-muted-foreground">{r.task}</span>
+            </button>
+            {r.pendingApprovals > 0 && <Badge tone="warn">needs your OK</Badge>}
+            <Badge>{r.mode}</Badge>
+            <NativeSelect
+              value={r.priority}
+              onChange={(e) => onPriority(r.runId, e.target.value as Priority)}
+              className="h-8 w-28 py-0 text-xs"
+              disabled={r.mode === "parallel"}
+              aria-label={`Priority of ${r.agent}`}
+            >
+              <option value="high">High</option>
+              <option value="normal">Normal</option>
+              <option value="low">Low</option>
+            </NativeSelect>
+            <Button variant="outline" size="sm" onClick={() => onStop(r.runId)} aria-label={`Stop ${r.agent}`}>
+              <Square /> Stop
+            </Button>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }

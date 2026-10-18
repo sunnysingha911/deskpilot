@@ -80,6 +80,21 @@ npm test                                               # unit tests (no network,
 
 Irreversible tool calls prompt `y/N` in an interactive terminal and are denied otherwise.
 
+## Several tasks at once
+
+Start as many tasks as you like from the Run page (e.g. the coder, the job-hunter and a creative
+agent): they all run side by side, listed under **Running now**, where you can watch, re-prioritize
+or stop each one. Thinking, shell commands, files and the browser (each task gets its own tab) run in
+parallel; only real keyboard/mouse/app actions take turns, since there's one screen. Pick a mode next
+to **Start**:
+
+- **Optimized** (default): a task keeps the desktop for a few seconds after an action, so steps like
+  click → type → Enter aren't interrupted by another task; **priority** decides who goes first.
+- **Parallel**: no holding; each desktop action takes its turn on its own. Fastest for tasks that
+  mostly use the shell, browser and thinking.
+
+The CLI takes `--mode` and `--priority` too, and shares the desktop safely with the control panel.
+
 ## Token use
 
 Agents keep their context small automatically: tool results are sent compactly, very long results

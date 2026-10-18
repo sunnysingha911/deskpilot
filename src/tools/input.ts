@@ -41,6 +41,7 @@ export const inputType = defineTool({
     sensitive: z.boolean().default(false).describe("Don't store the text in the action log"),
   }),
   output: z.object({ typedChars: z.number() }),
+  desktop: true,
   baseRisk: "reversible",
   classify: (i) => (/[\r\n]/.test(i.text) ? "irreversible" : "reversible"),
   platforms: DESKTOP_PLATFORMS,
@@ -57,6 +58,7 @@ export const inputHotkey = defineTool({
   description: 'Press a key combination, e.g. ["cmd","n"], ["cmd","shift","4"], ["escape"]. Return/Enter requires approval.',
   input: z.object({ app: FrontApp, keys: z.array(z.string().min(1)).min(1).max(6) }),
   output: z.object({ keys: z.array(z.string()) }),
+  desktop: true,
   baseRisk: "reversible",
   classify: (i) => classifyHotkey(i.keys),
   platforms: DESKTOP_PLATFORMS,
@@ -83,6 +85,7 @@ export const inputClick = defineTool({
     y: z.number(),
     target: z.object({ role: z.string().optional(), title: z.string().optional(), app: z.string().optional() }).nullable(),
   }),
+  desktop: true,
   baseRisk: "reversible",
   async classify(i) {
     const { element } = await requireBackend().elementAt(i.x, i.y);

@@ -12,6 +12,7 @@ import { AGENTS_DIR, AgentDefinition, listAgents, loadAgent } from "../agent/def
 import { AvatarLook, defaultLook } from "../agent/schema.ts";
 import { addStream, AttachmentError, createSet, MAX_FILE_BYTES, getAttachment, listSet, removeAttachment, setExists, SET_ID_RE } from "../core/attachments.ts";
 import { ActionLogger } from "../core/logger.ts";
+import { PRIORITIES, RUN_MODES, type Priority, type RunMode } from "../core/task.ts";
 import { DATA_DIR, ROOT } from "../core/paths.ts";
 import { getConnection, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
 import { availableTools } from "../tools/index.ts";
@@ -136,6 +137,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     ["GET", /^\/api\/meta$/, () => ({
       os: process.platform,
       activeRunId: runs.activeRunId(),
+      activeRuns: runs.activeRuns(),
       tools: availableTools().map((t) => ({ name: t.name, description: t.description, baseRisk: t.baseRisk, agentVisible: t.agentVisible !== false })),
     })],
 
@@ -218,6 +220,8 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
           with: Array.isArray(b.with) ? b.with.filter((n: unknown): n is string => typeof n === "string" && NAME_RE.test(n)) : undefined,
           fromRun: typeof b.fromRun === "string" && /^[\w-]+$/.test(b.fromRun) ? b.fromRun : undefined,
           attachments: typeof b.attachments === "string" && SET_ID_RE.test(b.attachments) ? b.attachments : undefined,
+          mode: RUN_MODES.includes(b.mode) ? (b.mode as RunMode) : undefined,
+          priority: PRIORITIES.includes(b.priority) ? (b.priority as Priority) : undefined,
         });
       } catch (err) {
         const status = (err as { status?: number }).status ?? 400;
@@ -253,6 +257,12 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
         createReadStream(f.path).pipe(res);
         return undefined;
       });
+    }],
+    ["POST", /^\/api\/runs\/([\w-]+)\/priority$/, async (req, _res, m) => {
+      const b = await readJson(req);
+      if (!PRIORITIES.includes(b.priority)) throw new HttpError(400, `priority must be one of ${PRIORITIES.join(", ")}`);
+      if (!runs.setPriority(m[1]!, b.priority)) throw new HttpError(404, "no such running task");
+      return { ok: true, priority: b.priority };
     }],
     ["POST", /^\/api\/runs\/([\w-]+)\/stop$/, (_req, _res, m) => ({ stopped: runs.stop(m[1]!) })],
     ["POST", /^\/api\/runs\/([\w-]+)\/approvals\/([\w-]+)$/, async (req, _res, m) => {
@@ -393,11 +403,13 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     server,
     url: `http://127.0.0.1:${port}/?t=${token}`,
     token,
-    close: () =>
-      new Promise((resolve) => {
+    close: async () => {
+      await runs.shutdown();
+      await new Promise<void>((resolve) => {
         presence.close();
         server.closeAllConnections();
         server.close(() => resolve());
-      }),
+      });
+    },
   };
 }

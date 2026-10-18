@@ -25,6 +25,8 @@ let mockUrl = "";
 const mockReplies: object[] = [];
 /** Request bodies the mock model received. */
 const mockRequests: any[] = [];
+/** When set, answers by request content (for runs in parallel); undefined falls back to mockReplies. */
+let mockHandler: ((body: any) => object | undefined) | undefined;
 const mock = createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c)).on("end", () => {
@@ -33,7 +35,7 @@ const mock = createServer((req, res) => {
     } catch {
       mockRequests.push(raw);
     }
-    const body = mockReplies.shift() ?? { choices: [{ message: { role: "assistant", content: "fallback reply" }, finish_reason: "stop" }] };
+    const body = (mockHandler && typeof mockRequests.at(-1) === "object" ? mockHandler(mockRequests.at(-1)) : undefined) ?? mockReplies.shift() ?? { choices: [{ message: { role: "assistant", content: "fallback reply" }, finish_reason: "stop" }] };
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: "mock-model", usage: { prompt_tokens: 5, completion_tokens: 3 }, ...body }));
   });
 });
@@ -199,8 +201,6 @@ describe("a full run through the GUI", () => {
     assert.equal(start.status, 200, JSON.stringify(start.body));
     const { runId } = start.body;
 
-    // A second run can't start while this one is active.
-    assert.equal((await call("POST", "/api/runs", { agent: AGENT, task: "again" })).status, 409);
 
     const events = await readEvents(
       runId,
@@ -369,5 +369,85 @@ describe("attachments through the GUI", () => {
     assert.equal(await rawStatus({}, `/api/runs/${runId}/attachments/..%2F..%2Factions.db`), 404);
     assert.equal(await rawStatus({}, `/api/runs/${runId}/attachments/%2E%2E`), 404);
     assert.equal((await call("POST", "/api/runs", { agent: AGENT, task: "x", attachments: "att-2026-01-01-00000000" })).status, 400);
+  });
+});
+
+describe("several tasks at once", () => {
+  test("shutting the server down stops running tasks cleanly (none stays 'running')", async () => {
+    const own = new ActionLogger(join(tmp, "shutdown.db"));
+    const gui2 = await startGuiServer({ port: 0, logger: own });
+    const base2 = new URL(gui2.url).origin;
+    mockHandler = () => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "s1", type: "function", function: { name: "shell__run", arguments: JSON.stringify({ command: `rm -f ${MARKER}` }) } }] }, finish_reason: "tool_calls" }] });
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
+    try {
+      const res = await fetch(`${base2}/api/runs`, { method: "POST", headers: { "x-deskpilot-token": gui2.token, "content-type": "application/json" }, body: JSON.stringify({ agent: AGENT, task: "wait for approval" }) });
+      const { runId } = (await res.json()) as { runId: string };
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && !own.runEvents(runId).some((e) => e.type === "approval_request")) await new Promise((r) => setTimeout(r, 20));
+      await gui2.close();
+      assert.equal(own.getRun(runId)!.status, "stopped");
+      assert.equal(readFileSync(MARKER, "utf8"), "must survive");
+    } finally {
+      mockHandler = undefined;
+      delete process.env.XAI_API_KEY;
+      own.close();
+    }
+  });
+
+  test("two tasks run side by side: one waits for approval while the other finishes; priority and stop are per task", async () => {
+    const userText = (b: any) => String(b.messages?.find((m: any) => m.role === "user")?.content ?? "");
+    const hasTool = (b: any) => b.messages?.some((m: any) => m.role === "tool");
+    mockHandler = (b) => {
+      if (userText(b).includes("TASK-A")) {
+        return hasTool(b)
+          ? { choices: [{ message: { role: "assistant", content: "A: not deleted (declined)" }, finish_reason: "stop" }] }
+          : { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "a1", type: "function", function: { name: "shell__run", arguments: JSON.stringify({ command: `rm -f ${MARKER}` }) } }] }, finish_reason: "tool_calls" }] };
+      }
+      if (userText(b).includes("TASK-B")) return { choices: [{ message: { role: "assistant", content: "B: done" }, finish_reason: "stop" }] };
+      if (userText(b).includes("TASK-C")) return { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "shell__run", arguments: JSON.stringify({ command: "sleep 3" }) } }] }, finish_reason: "tool_calls" }] };
+      return undefined;
+    };
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
+    try {
+      const a = await call("POST", "/api/runs", { agent: AGENT, task: "TASK-A delete the marker", mode: "optimized", priority: "low" });
+      const b = await call("POST", "/api/runs", { agent: AGENT, task: "TASK-B say done", mode: "parallel" });
+      const c = await call("POST", "/api/runs", { agent: AGENT, task: "TASK-C wait a bit" });
+      for (const r of [a, b, c]) assert.equal(r.status, 200, JSON.stringify(r.body));
+
+      // A pauses for approval; B finishes meanwhile.
+      let approvalId = "";
+      const eventsA = readEvents(a.body.runId, (t) => t.includes("closed"), async (type, data) => {
+        if (type === "approval_request") approvalId = data.id;
+      });
+      const eventsB = await readEvents(b.body.runId, (t) => t.includes("closed"));
+      assert.equal(eventsB.find((e) => e.type === "end")!.data.summary.finalText, "B: done");
+      const deadline = Date.now() + 5000;
+      while (!approvalId && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+      assert.ok(approvalId, "A asked for approval");
+
+      const meta = (await call("GET", "/api/meta")).body;
+      const runA = meta.activeRuns.find((r: any) => r.runId === a.body.runId);
+      assert.deepEqual([runA.mode, runA.priority, runA.pendingApprovals], ["optimized", "low", 1]);
+      assert.ok(meta.activeRuns.some((r: any) => r.runId === c.body.runId), "C is still running too");
+      assert.ok(!meta.activeRuns.some((r: any) => r.runId === b.body.runId), "B is done");
+
+      // Priority changes while running; bad values are refused.
+      assert.equal((await call("POST", `/api/runs/${a.body.runId}/priority`, { priority: "high" })).status, 200);
+      assert.equal((await call("GET", "/api/meta")).body.activeRuns.find((r: any) => r.runId === a.body.runId).priority, "high");
+      assert.equal((await call("POST", `/api/runs/${a.body.runId}/priority`, { priority: "urgent" })).status, 400);
+
+      // Stopping C leaves A waiting; A's approval belongs to A only.
+      assert.equal((await call("POST", `/api/runs/${c.body.runId}/stop`)).body.stopped, true);
+      assert.equal((await call("POST", `/api/runs/${c.body.runId}/approvals/${approvalId}`, { approved: false })).status, 404);
+      assert.equal((await call("POST", `/api/runs/${a.body.runId}/approvals/${approvalId}`, { approved: false })).status, 200);
+      const endA = (await eventsA).find((e) => e.type === "end")!.data.summary;
+      assert.equal(endA.finalText, "A: not deleted (declined)");
+      assert.equal(readFileSync(MARKER, "utf8"), "must survive");
+      const endC = (await readEvents(c.body.runId, (t) => t.includes("closed") || t.includes("idle"))).find((e) => e.type === "end")!.data.summary;
+      assert.equal(endC.status, "stopped");
+    } finally {
+      mockHandler = undefined;
+      delete process.env.XAI_API_KEY;
+    }
   });
 });

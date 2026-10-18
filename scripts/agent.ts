@@ -1,12 +1,15 @@
 // Run an agent on a task:  npm run agent -- <agent-name> "<task>" [--file <path>]...
 // --file attaches a file (copied into data/uploads; the original is only read).
+// --mode optimized|parallel and --priority high|normal|low: how it shares the desktop with tasks
+// running elsewhere (the control panel, other terminals).
 // Irreversible (and alwaysAsk) tool calls prompt y/N in the terminal; non-interactive runs deny them.
 // "@other-agent" in the task lets the agent hand sub-tasks to that agent (as does canDelegateTo).
 import { join } from "node:path";
 import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../src/agent/definition.ts";
-import { runAgent, type RunEvent } from "../src/agent/runner.ts";
+import { newRunId, runAgent, type RunEvent } from "../src/agent/runner.ts";
 import { cliApprover } from "../src/core/approval.ts";
 import { addFromPath, createSet, formatSize, listSet, type AttachmentSet } from "../src/core/attachments.ts";
+import { endTask, PRIORITIES, RUN_MODES, type Priority, type RunMode, type TaskInfo } from "../src/core/task.ts";
 import { Executor } from "../src/core/executor.ts";
 import { ActionLogger } from "../src/core/logger.ts";
 import { ROOT } from "../src/core/paths.ts";
@@ -22,8 +25,19 @@ try {
 const argv = process.argv.slice(2);
 const files: string[] = [];
 const words: string[] = [];
+let mode: RunMode = "optimized";
+let priority: Priority = "normal";
 for (let i = 0; i < argv.length; i++) {
-  if (argv[i] === "--file") {
+  if (argv[i] === "--mode" || argv[i] === "--priority") {
+    const v = argv[++i] ?? "";
+    const allowed: readonly string[] = argv[i - 1] === "--mode" ? RUN_MODES : PRIORITIES;
+    if (!allowed.includes(v)) {
+      console.error(`${argv[i - 1]} must be one of: ${allowed.join(", ")}`);
+      process.exit(2);
+    }
+    if (argv[i - 1] === "--mode") mode = v as RunMode;
+    else priority = v as Priority;
+  } else if (argv[i] === "--file") {
     if (!argv[i + 1]) {
       console.error("--file needs a path");
       process.exit(2);
@@ -34,7 +48,7 @@ for (let i = 0; i < argv.length; i++) {
 const [name, ...rest] = words;
 const task = rest.join(" ").trim();
 if (!name || !task) {
-  console.error('usage: npm run agent -- <agent-name> "<task>" [--file <path>]...');
+  console.error('usage: npm run agent -- <agent-name> "<task>" [--file <path>]... [--mode optimized|parallel] [--priority high|normal|low]');
   process.exit(2);
 }
 
@@ -107,7 +121,11 @@ if (files.length) {
 }
 
 if (userAllowed.length) console.log(dim(`may call: ${userAllowed.join(", ")} (mentioned in the task)`));
+const runId = newRunId();
+const taskInfo: TaskInfo = { id: runId, mode, priority: () => priority };
 const result = await runAgent(def, task, {
+  runId,
+  task: taskInfo,
   provider: providerFor(def),
   executor,
   logger,
@@ -115,5 +133,6 @@ const result = await runAgent(def, task, {
   delegation: { loadAgent, providerFor, userAllowed, listAgents: agentNames },
   attachments: attachments && { set: attachments, showToModel: true },
 });
+await endTask(taskInfo.id);
 logger.close();
 process.exitCode = result.status === "completed" ? 0 : 1;

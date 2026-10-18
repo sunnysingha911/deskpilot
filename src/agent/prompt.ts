@@ -12,7 +12,7 @@ export function buildSystemPrompt(def: AgentDefinition, platform: NodeJS.Platfor
 - Take the most direct text-based route: shell or CLI, then applescript.run for scriptable apps, then ui.* (accessibility tree), then browser.*, and input.* (raw keyboard and mouse) only when nothing else works.
 - Look before you act, and check the result afterwards.
 - Address UI elements by selector where you can. Refs from ui.dump_tree and ui.find (like u12) go stale as soon as the UI changes; if an element isn't found, look again. Prefer ui.find over dumping whole trees.
-- input.* tools only work while the target app is frontmost; activate it first.
+- input.* tools only work while the target app is frontmost; activate it first. Other agents may be working on this computer at the same time, so check which app is frontmost before typing or clicking, and check the result after.
 - Files you create belong in the scratch folder, which is shell.run's default working directory.
 
 # Approval

@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import type { AttachmentSet } from "../core/attachments.ts";
 import type { Executor } from "../core/executor.ts";
+import type { TaskInfo } from "../core/task.ts";
 import type { ActionLogger, RunStatus, RunSummary } from "../core/logger.ts";
 import { defineTool, ToolError, toolSpec, type ToolDef } from "../core/tool.ts";
 import type { InlineFile, ModelProvider, ToolResultInput, TurnInput, Usage } from "../llm/types.ts";
@@ -57,6 +58,8 @@ export interface RunDeps {
    * the set but read it with file.read only.
    */
   attachments?: { set: AttachmentSet; showToModel: boolean } | undefined;
+  /** The task this run belongs to (shared with the runs it delegates to): desktop turns, browser tab. */
+  task?: TaskInfo | undefined;
   /** Stale-observation pruning (default DEFAULT_PRUNE); false turns it off, e.g. to compare token use. */
   prune?: PrunePolicy | false | undefined;
 }
@@ -88,6 +91,9 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
   // so a declined action can't be re-routed to another agent.
   let blockedActions = 0;
   const started = Date.now();
+  // Time spent waiting for the user's approval or for the desktop doesn't count against the time budget.
+  let waitedMs = 0;
+  const busySeconds = () => (Date.now() - started - waitedMs) / 1000;
 
   const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL && t.name !== FILE_READ_TOOL && t.name !== RESULT_MORE_TOOL);
   const runTools: ToolDef[] = [];
@@ -109,7 +115,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
       emit: (e) => emit(e),
       remaining: () => ({
         outputTokens: def.budget.maxOutputTokens - usage.outputTokens - delegatedOutputTokens,
-        seconds: Math.floor(def.budget.maxSeconds - (Date.now() - started) / 1000),
+        seconds: Math.floor(def.budget.maxSeconds - busySeconds()),
       }),
       spent: (outputTokens, blocked) => {
         delegatedOutputTokens += outputTokens;
@@ -178,7 +184,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
         error = `output token budget (${def.budget.maxOutputTokens}) exhausted`;
         break;
       }
-      if ((Date.now() - started) / 1000 >= def.budget.maxSeconds) {
+      if (busySeconds() >= def.budget.maxSeconds) {
         error = `time budget (${def.budget.maxSeconds}s) exhausted`;
         break;
       }
@@ -239,13 +245,15 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
         const r = await executor.call(
           call.name,
           call.input,
-          { caller: def.name, sessionId: runId, chain: [...chain, def.name], ...(deps.signal && { signal: deps.signal }) },
+          { caller: def.name, sessionId: runId, chain: [...chain, def.name], ...(deps.signal && { signal: deps.signal }), ...(deps.task && { task: deps.task }) },
           {
             forceApproval: needsAlwaysAsk(def, call.name) || (call.name === DELEGATE_TOOL && blockedActions > 0),
             askAbove: def.approval.askAbove,
           },
         );
         if (r.status === "blocked") blockedActions++;
+        // (A hand-off's own approval wait is excluded too; the called agent's working time still counts.)
+        waitedMs += r.waitedMs;
         if (call.name === "plan.update" && r.ok) emit({ type: "plan", steps: (r.output as { steps: Extract<RunEvent, { type: "plan" }>["steps"] }).steps });
         const formatted = formatToolResult(r, { spill, stats });
         results.push({ id: call.id, ...formatted });
@@ -338,6 +346,7 @@ function makeDelegateTool(
         delegation: { loadAgent: delegation.loadAgent, providerFor: delegation.providerFor, listAgents: delegation.listAgents, chain: childChain },
         attachments: run.deps.attachments && { set: run.deps.attachments.set, showToModel: false },
         prune: run.deps.prune,
+        task: run.deps.task,
         // Nested runs' events already arrive wrapped; pass those through unchanged.
         onEvent: (e) => run.emit(e.type === "sub" ? e : { type: "sub", runId: childRunId, agent: target.name, depth, event: e }),
       });

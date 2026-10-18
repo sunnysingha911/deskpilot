@@ -1,3 +1,4 @@
+import { desktopLock, type DesktopLock } from "./desktop-lock.ts";
 import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import type { ActionLogger, ActionStatus } from "./logger.ts";
@@ -37,6 +38,8 @@ export interface ToolResult {
   untrusted: boolean;
   logId: number;
   durationMs: number;
+  /** Time spent waiting for the user's approval or the desktop, not working (excluded from time budgets). */
+  waitedMs: number;
 }
 
 export class Executor {
@@ -46,6 +49,7 @@ export class Executor {
     tools: ToolDef[],
     private logger: ActionLogger,
     private approver: Approver = denyAll,
+    private lock: DesktopLock = desktopLock(),
   ) {
     for (const t of tools) {
       if (this.tools.has(t.name)) throw new Error(`duplicate tool ${t.name}`);
@@ -55,7 +59,7 @@ export class Executor {
 
   /** Same logger and approver, plus extra tools (e.g. a run's agent.delegate). */
   withTools(extra: ToolDef[]): Executor {
-    return new Executor([...this.tools.values(), ...extra], this.logger, this.approver);
+    return new Executor([...this.tools.values(), ...extra], this.logger, this.approver, this.lock);
   }
 
   list(): ToolDef[] {
@@ -80,6 +84,7 @@ export class Executor {
     const fullCtx: ToolContext = { caller: "unknown", sessionId: randomUUID(), ...ctx };
     const started = performance.now();
     const tool = this.tools.get(name);
+    let waitedMs = 0;
 
     const finish = (
       status: ActionStatus,
@@ -110,6 +115,7 @@ export class Executor {
         untrusted: tool?.untrustedOutput ?? false,
         logId,
         durationMs,
+        waitedMs,
       };
     };
 
@@ -142,7 +148,9 @@ export class Executor {
     const aboveLimit = !!opts.askAbove && RISK_LEVELS.indexOf(risk) > RISK_LEVELS.indexOf(opts.askAbove);
     if (risk === "irreversible" || opts.forceApproval || aboveLimit) {
       const reason = risk === "irreversible" ? "irreversible" : "rule";
+      const asked = performance.now();
       const decision = await this.approver({ tool: name, risk, input: logInput, caller: fullCtx.caller, sessionId: fullCtx.sessionId, reason, ...(fullCtx.chain && { chain: fullCtx.chain }) });
+      waitedMs += Math.round(performance.now() - asked);
       if (!decision.approved) {
         const what = reason === "irreversible" ? "is irreversible" : "requires approval for this agent";
         return finish("blocked", risk, logInput, {
@@ -154,7 +162,14 @@ export class Executor {
     }
 
     try {
-      const raw = await tool.run(input, fullCtx);
+      let raw: unknown;
+      if (tool.desktop) {
+        const r = await this.lock.run(fullCtx.task, () => tool.run(input, fullCtx));
+        waitedMs += r.waitedMs;
+        raw = r.value;
+      } else {
+        raw = await tool.run(input, fullCtx);
+      }
       const out = tool.output.safeParse(raw);
       if (!out.success) {
         return finish("error", risk, logInput, {
