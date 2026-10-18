@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import type { ActionLogger, ActionStatus } from "./logger.ts";
 import type { Risk } from "./risk.ts";
-import { maxRisk } from "./risk.ts";
+import { maxRisk, RISK_LEVELS } from "./risk.ts";
 import { ToolError, type ToolContext, type ToolDef } from "./tool.ts";
 
 export interface ApprovalRequest {
@@ -70,7 +70,12 @@ export class Executor {
     name: string,
     rawInput: unknown,
     ctx: Partial<ToolContext> = {},
-    opts: { forceApproval?: boolean } = {},
+    opts: {
+      /** Ask whatever the risk (an agent's alwaysAsk rule). */
+      forceApproval?: boolean;
+      /** Ask when the classified risk is above this level (an agent's askAbove rule). */
+      askAbove?: Risk | undefined;
+    } = {},
   ): Promise<ToolResult> {
     const fullCtx: ToolContext = { caller: "unknown", sessionId: randomUUID(), ...ctx };
     const started = performance.now();
@@ -134,7 +139,8 @@ export class Executor {
     }
 
     let approvedBy: string | undefined;
-    if (risk === "irreversible" || opts.forceApproval) {
+    const aboveLimit = !!opts.askAbove && RISK_LEVELS.indexOf(risk) > RISK_LEVELS.indexOf(opts.askAbove);
+    if (risk === "irreversible" || opts.forceApproval || aboveLimit) {
       const reason = risk === "irreversible" ? "irreversible" : "rule";
       const decision = await this.approver({ tool: name, risk, input: logInput, caller: fullCtx.caller, sessionId: fullCtx.sessionId, reason, ...(fullCtx.chain && { chain: fullCtx.chain }) });
       if (!decision.approved) {

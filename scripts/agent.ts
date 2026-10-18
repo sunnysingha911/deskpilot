@@ -33,7 +33,8 @@ const short = (v: unknown, n = 160) => {
   return s.length > n ? s.slice(0, n) + "…" : s;
 };
 
-const userAllowed = parseMentions(task, listAgents().map((a) => a.name), def.name);
+const agentNames = () => listAgents().map((a) => a.name);
+const userAllowed = parseMentions(task, agentNames(), def.name);
 const providerFor = (d: AgentDefinition) => createProvider(d.model);
 
 const print = (e: RunEvent, agent: AgentDefinition | string = def, depth = 0) => {
@@ -43,6 +44,9 @@ const print = (e: RunEvent, agent: AgentDefinition | string = def, depth = 0) =>
   switch (e.type) {
     case "start":
       log(dim(`run ${e.runId} · ${label} · tools: ${e.tools.join(", ")}`));
+      break;
+    case "plan":
+      log(`📋 plan\n${e.steps.map((s, i) => `   ${{ done: "✓", failed: "✗", skipped: "–", running: "…" }[s.status] ?? "○"} ${i + 1}. ${s.agent ? `[${s.agent}] ` : ""}${s.task}${s.note ? ` — ${s.note}` : ""}`).join("\n")}`);
       break;
     case "delegate_start":
       log(`⇢ handing off to ${e.agent}: ${short(e.task, 200)}`);
@@ -81,7 +85,7 @@ const result = await runAgent(def, task, {
   executor,
   logger,
   onEvent: (e) => print(e),
-  delegation: { loadAgent, providerFor, userAllowed },
+  delegation: { loadAgent, providerFor, userAllowed, listAgents: agentNames },
 });
 logger.close();
 process.exitCode = result.status === "completed" ? 0 : 1;

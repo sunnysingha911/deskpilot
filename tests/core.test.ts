@@ -59,6 +59,16 @@ describe("classifyShell", () => {
     ["osascript -e 'beep'", "irreversible"],
     ["killall Finder", "irreversible"],
     ["Remove-Item C:\\x -Recurse", "irreversible"],
+    // Quote-aware: `>` and `|` inside quotes are data, not shell syntax.
+    ["lsof -nP -iTCP -sTCP:LISTEN | awk 'NR>1 {print $1, $9}' | sort -u", "read_only"],
+    ["grep 'a|b' f.txt", "read_only"],
+    ["echo 'x > y'", "read_only"],
+    ["echo \"$(whoami) > y\"", "irreversible"],
+    ["awk '{print > \"out.txt\"}' f", "reversible"],
+    ["awk 'BEGIN{system(\"ls\")}'", "reversible"],
+    ["awk '{print | \"sh\"}' f", "reversible"],
+    ["awk -f prog.awk f", "reversible"],
+    ["echo 'unterminated", "reversible"],
   ];
   for (const [cmd, want] of cases) test(`${want}: ${cmd}`, () => assert.equal(classifyShell(cmd), want));
 });

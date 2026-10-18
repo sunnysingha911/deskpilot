@@ -19,6 +19,7 @@ import { Executor, type ApprovalRequest, type Approver } from "../src/core/execu
 import { ActionLogger } from "../src/core/logger.ts";
 import { ensureDir, SCRATCH_DIR } from "../src/core/paths.ts";
 import { defineTool, type ToolDef } from "../src/core/tool.ts";
+import { planUpdate } from "../src/tools/plan.ts";
 import type { ModelProvider, ModelTurn, SessionOptions, TurnInput } from "../src/llm/types.ts";
 
 const tmp = mkdtempSync(join(ensureDir(SCRATCH_DIR), "delegation-test-"));
@@ -66,7 +67,25 @@ const sendTool = defineTool({
   untrustedOutput: false,
   run: async () => ({ sent: true }),
 });
-const tools = [sendTool] as ToolDef[];
+const writeTool = defineTool({
+  name: "test.write",
+  description: "changes something (reversible)",
+  input: z.object({}),
+  output: z.object({ wrote: z.boolean() }),
+  baseRisk: "reversible",
+  untrustedOutput: false,
+  run: async () => ({ wrote: true }),
+});
+const readTool = defineTool({
+  name: "test.read",
+  description: "reads something",
+  input: z.object({}),
+  output: z.object({ ok: z.boolean() }),
+  baseRisk: "read_only",
+  untrustedOutput: false,
+  run: async () => ({ ok: true }),
+});
+const tools = [sendTool, writeTool, readTool, planUpdate] as ToolDef[];
 
 const agent = (name: string, over: Record<string, unknown> = {}) =>
   AgentDefinition.parse({
@@ -93,6 +112,7 @@ function setup(defs: AgentDefinition[], scripts: Record<string, ModelTurn[]>, ap
       return d;
     },
     providerFor: (d) => providers.get(d.name)!,
+    listAgents: () => defs.map((d) => d.name),
     ...extra,
   });
   const go = (task = "do the task", extra: Partial<Delegation> = {}) =>
@@ -290,5 +310,90 @@ describe("logger migration", () => {
     assert.equal(l.getRun("old-run")!.parent_run_id, null);
     assert.equal(l.childRuns("old-run")[0]!.relation, "handoff");
     l.close();
+  });
+});
+
+describe("orchestrator building blocks", () => {
+  test('canDelegateTo ["*"] means every other agent', () => {
+    const o = agent("orch", { tools: [], canDelegateTo: ["*"] });
+    assert.deepEqual(delegationTargets(o, { listAgents: () => ["orch", "coder", "auditor"] }), ["coder", "auditor"]);
+    assert.deepEqual(delegationTargets(o, {}), [], "no agent list, no targets");
+  });
+
+  test("an agent may have no tools if it can hand work to others, but not neither", () => {
+    assert.ok(AgentDefinition.safeParse({ name: "o", description: "", system: "x", tools: [], canDelegateTo: ["*"], model: { provider: "anthropic", id: "m" } }).success);
+    const bad = AgentDefinition.safeParse({ name: "o", description: "", system: "x", tools: [], model: { provider: "anthropic", id: "m" } });
+    assert.ok(!bad.success);
+    assert.match(bad.error!.issues[0]!.message, /at least one tool/);
+  });
+
+  test("askAbove: read_only lets reads run and asks before anything that changes something", async () => {
+    const asked: string[] = [];
+    const { providers, go } = setup(
+      [agent("auditor", { approval: { askAbove: "read_only" } })],
+      {
+        auditor: [
+          turn({ toolCalls: [{ id: "r", name: "test.read", input: {} }, { id: "w", name: "test.write", input: {} }] }),
+          turn({ text: "done" }),
+        ],
+      },
+      async (req) => (asked.push(`${req.tool}:${req.reason}`), { approved: false, by: "test:deny" }),
+    );
+    await go();
+    assert.deepEqual(asked, ["test.write:rule"]);
+    const [read, write] = resultsOf(providers.get("auditor")!.inputs[1]);
+    assert.match(read!.content, /^ok/);
+    assert.match(write!.content, /^BLOCKED/);
+  });
+
+  test("orchestrator: plan → hand off → update plan → combined answer; plan events stream", async () => {
+    const orch = agent("orch", { tools: ["plan.update"], canDelegateTo: ["*"] });
+    const plan = (status: string) => ({ id: `p-${status}`, name: "plan.update", input: { steps: [{ task: "count files", agent: "coder", status }] } });
+    const { providers, events, go } = setup([orch, agent("coder")], {
+      orch: [
+        turn({ toolCalls: [plan("running"), delegateCall("coder", "count the files in /tmp/x")] }),
+        turn({ toolCalls: [plan("done")] }),
+        turn({ text: "coder found 3 files" }),
+      ],
+      coder: [turn({ text: "3 files" })],
+    });
+    const r = await go();
+    assert.equal(r.status, "completed");
+    assert.deepEqual(
+      providers.get("orch")!.opts!.tools.map((t) => t.name),
+      ["plan.update", DELEGATE_TOOL],
+    );
+    const plans = events.filter((e) => e.type === "plan") as Array<Extract<RunEvent, { type: "plan" }>>;
+    assert.deepEqual(
+      plans.map((p) => p.steps[0]!.status),
+      ["running", "done"],
+    );
+    assert.equal(plans[0]!.steps[0]!.agent, "coder");
+  });
+});
+
+describe("declined actions can't be re-routed", () => {
+  test("after a called agent's action is blocked, the next hand-off needs approval", async () => {
+    const asked: string[] = [];
+    const { providers, go } = setup(
+      [agent("orch", { tools: [], canDelegateTo: ["*"] }), agent("auditor"), agent("helper")],
+      {
+        orch: [
+          turn({ toolCalls: [delegateCall("auditor", "send it", "d1")] }),
+          turn({ toolCalls: [delegateCall("helper", "send it instead", "d2")] }),
+          turn({ text: "couldn't" }),
+        ],
+        auditor: [turn({ toolCalls: [{ id: "s", name: "test.send", input: {} }] }), turn({ text: "blocked" })],
+        helper: [turn({ toolCalls: [{ id: "s", name: "test.send", input: {} }] }), turn({ text: "sent" })],
+      },
+      async (req) => (asked.push(`${req.caller}:${req.tool}:${req.reason}`), { approved: false, by: "test:deny" }),
+    );
+    const r = await go();
+    assert.deepEqual(asked, ["auditor:test.send:irreversible", "orch:agent.delegate:rule"]);
+    assert.equal(providers.get("helper")!.inputs.length, 0, "the helper never ran");
+    const first = resultsOf(providers.get("orch")!.inputs[1])[0]!;
+    assert.match(first.content, /"blockedActions": 1/);
+    assert.match(resultsOf(providers.get("orch")!.inputs[2])[0]!.content, /^BLOCKED/);
+    assert.equal(r.blockedActions, 2);
   });
 });

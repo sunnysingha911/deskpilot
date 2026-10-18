@@ -1,7 +1,7 @@
 // Run workflow timeline, shared by the live view and run history. Every value from a run is
 // rendered as React text (escaped); run output is untrusted and must never become HTML.
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRightLeft, Bot, Brain, CircleCheck, CircleX, ShieldAlert, Users, Wrench } from "lucide-react";
+import { ArrowRightLeft, Bot, Brain, Circle, CircleCheck, CircleX, ListChecks, LoaderCircle, MinusCircle, ShieldAlert, Users, Wrench } from "lucide-react";
 import { Link } from "react-router";
 import { useState, type ReactNode } from "react";
 import { Badge, StatusBadge } from "@/components/ui/badge";
@@ -18,7 +18,10 @@ type Item =
   | { kind: "event"; ev: Ev }
   | { kind: "tool"; call: Ev; result?: Ev }
   | { kind: "approval"; req: Ev; resolved?: Ev }
-  | { kind: "delegate"; start: Ev; end?: Ev; items: Item[] };
+  | { kind: "delegate"; start: Ev; end?: Ev; items: Item[]; plan?: Ev };
+
+/** The newest plan.update checklist among a run's own events. */
+const latestPlan = (events: Ev[]) => events.findLast((e) => e.type === "plan");
 
 /**
  * Events of runs this run delegated to arrive wrapped ({type:"sub", runId, event}) in one flat stream,
@@ -59,13 +62,14 @@ function groupItems(events: Ev[], byRun: Map<string, Ev[]>): Item[] {
       const it = approvals.get(`${ev._runId}:${ev.id}`);
       if (it) it.resolved = ev;
     } else if (ev.type === "delegate_start") {
-      const it = { kind: "delegate" as const, start: ev, items: groupItems(byRun.get(ev.runId) ?? [], byRun) };
+      const own = byRun.get(ev.runId) ?? [];
+      const it = { kind: "delegate" as const, start: ev, items: groupItems(own, byRun), plan: latestPlan(own) };
       delegates.set(ev.runId, it);
       items.push(it);
     } else if (ev.type === "delegate_end") {
       const it = delegates.get(ev.runId);
       if (it) it.end = ev;
-    } else if (ev.type !== "closed") {
+    } else if (ev.type !== "closed" && ev.type !== "plan") {
       items.push({ kind: "event", ev });
     }
   }
@@ -235,8 +239,43 @@ function EventItem({ ev }: { ev: RunEvent }) {
   }
 }
 
+const STEP_ICON: Record<string, ReactNode> = {
+  done: <CircleCheck className="text-ok" />,
+  failed: <CircleX className="text-bad" />,
+  skipped: <MinusCircle className="text-muted-foreground" />,
+  running: <LoaderCircle className="animate-spin text-primary" />,
+};
+
+/** The agent's latest plan (plan.update), shown as a live checklist. */
+function PlanCard({ plan }: { plan: Ev }) {
+  const steps = (plan.steps ?? []) as Array<{ task: string; agent?: string; status: string; note?: string }>;
+  const done = steps.filter((s) => s.status === "done").length;
+  return (
+    <div className="rounded-lg border bg-card px-3.5 py-3">
+      <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+        <ListChecks className="size-4 text-primary" /> Plan
+        <span className="text-xs font-normal text-muted-foreground">
+          {done} of {steps.length} done
+        </span>
+      </div>
+      <ol className="flex flex-col gap-1.5">
+        {steps.map((s, i) => (
+          <li key={i} className="flex items-start gap-2 text-sm">
+            <span className="mt-0.5 [&_svg]:size-4">{STEP_ICON[s.status] ?? <Circle className="text-muted-foreground" />}</span>
+            <div className="min-w-0">
+              <span className={s.status === "skipped" ? "text-muted-foreground line-through" : undefined}>{s.task}</span>
+              {s.agent && <span className="ml-2 font-mono text-xs text-primary">{s.agent}</span>}
+              {s.note && <div className="text-xs text-muted-foreground">{s.note}</div>}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 /** A run this agent handed a sub-task to, with its own steps nested inside. */
-function DelegateItem({ start, end, items }: { start: Ev; end?: Ev; items: Item[] }) {
+function DelegateItem({ start, end, items, plan }: { start: Ev; end?: Ev; items: Item[]; plan?: Ev }) {
   const [open, setOpen] = useState(true);
   return (
     <div className="rounded-lg border border-primary/40 bg-accent/30">
@@ -256,7 +295,8 @@ function DelegateItem({ start, end, items }: { start: Ev; end?: Ev; items: Item[
       </div>
       <div className="px-3.5 pb-2 text-sm whitespace-pre-wrap text-muted-foreground">{start.task}</div>
       {open && items.length > 0 && (
-        <div className="ml-3.5 border-l-2 border-primary/30 py-2 pr-3 pl-3">
+        <div className="ml-3.5 flex flex-col gap-2 border-l-2 border-primary/30 py-2 pr-3 pl-3">
+          {plan && <PlanCard plan={plan} />}
           <Items items={items} />
         </div>
       )}
@@ -273,7 +313,7 @@ function Items({ items }: { items: Item[] }) {
         ) : it.kind === "approval" ? (
           <ApprovalItem key={it.req._key} req={it.req} resolved={it.resolved} />
         ) : it.kind === "delegate" ? (
-          <DelegateItem key={it.start._key} start={it.start} end={it.end} items={it.items} />
+          <DelegateItem key={it.start._key} start={it.start} end={it.end} items={it.items} plan={it.plan} />
         ) : (
           <EventItem key={it.ev._key} ev={it.ev} />
         ),
@@ -283,5 +323,11 @@ function Items({ items }: { items: Item[] }) {
 }
 
 export function Timeline({ events }: { events: Ev[] }) {
-  return <Items items={buildItems(events)} />;
+  const plan = latestPlan(events.filter((e) => e.type !== "sub"));
+  return (
+    <div className="flex flex-col gap-2">
+      {plan && <PlanCard plan={plan} />}
+      <Items items={buildItems(events)} />
+    </div>
+  );
 }

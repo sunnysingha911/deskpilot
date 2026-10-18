@@ -185,7 +185,7 @@ export class RunManager {
             logger: this.logger,
             runId: currentRunId,
             parent,
-            delegation: { loadAgent, providerFor: providerForAgent, userAllowed },
+            delegation: { loadAgent, providerFor: providerForAgent, userAllowed, listAgents: () => listAgents().map((a) => a.name) },
             signal: active.controller.signal,
             onEvent: (e, id) => this.publish(currentRunId, e, id),
           });

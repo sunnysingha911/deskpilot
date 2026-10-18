@@ -171,7 +171,7 @@ export function RunPage() {
             <div className="text-xs font-medium text-muted-foreground">Agents it may hand work to in this run</div>
             <div className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1.5">
               {others.map((a) => {
-                const always = selected.canDelegateTo.includes(a.name);
+                const always = selected.canDelegateTo.includes(a.name) || selected.canDelegateTo.includes("*");
                 const viaMention = mentioned.includes(a.name);
                 const on = always || viaMention || withAgents.includes(a.name);
                 return (

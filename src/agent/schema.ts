@@ -9,7 +9,8 @@ export const AgentDefinition = z
     name: z.string().regex(AGENT_NAME_RE),
     description: z.string(),
     system: z.string().min(1).describe("Role-specific instructions; the safety preamble is added automatically"),
-    tools: z.array(ToolPattern).min(1),
+    /** Tool names or globs. May be empty for an agent that only hands work to others. */
+    tools: z.array(ToolPattern).default([]),
     model: z
       .object({
         provider: z.enum(["anthropic", "openai-compatible", "ollama"]),
@@ -30,17 +31,23 @@ export const AgentDefinition = z
       })
       .strict()
       .prefault({}),
-    /** Other agents this one may hand sub-tasks to (gives it the agent.delegate tool). */
-    canDelegateTo: z.array(z.string().regex(AGENT_NAME_RE)).default([]),
+    /** Other agents this one may hand sub-tasks to (gives it the agent.delegate tool). "*" = any agent. */
+    canDelegateTo: z.array(z.union([z.literal("*"), z.string().regex(AGENT_NAME_RE)])).default([]),
     approval: z
       .object({
         /** Tools (or globs) that need approval on every call, whatever their risk. Irreversible always does. */
         alwaysAsk: z.array(ToolPattern).default([]),
+        /** Ask for any action riskier than this, whatever the tool ("read_only" = only reads run freely). */
+        askAbove: z.enum(["read_only", "reversible"]).optional(),
       })
       .strict()
       .prefault({}),
   })
-  .strict();
+  .strict()
+  .refine((d) => d.tools.length > 0 || d.canDelegateTo.length > 0, {
+    message: "give the agent at least one tool, or agents it can hand work to",
+    path: ["tools"],
+  });
 export type AgentDefinition = z.infer<typeof AgentDefinition>;
 
 export function matchesPattern(pattern: string, toolName: string): boolean {

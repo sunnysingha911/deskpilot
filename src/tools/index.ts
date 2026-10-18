@@ -2,6 +2,7 @@ import type { ToolDef } from "../core/tool.ts";
 import { applescriptRun } from "./applescript.ts";
 import { browserClick, browserClose, browserFill, browserOpen, browserSnapshot } from "./browser.ts";
 import { inputClick, inputHotkey, inputType } from "./input.ts";
+import { planUpdate } from "./plan.ts";
 import { screenshot } from "./screenshot.ts";
 import { shellRun } from "./shell.ts";
 import { uiCheckAccess, uiDumpTree, uiFind, uiListApps, uiPress, uiSetValue } from "./ui.ts";
@@ -24,6 +25,7 @@ const ALL: ToolDef[] = [
   browserClick,
   browserFill,
   browserClose,
+  planUpdate,
 ] as ToolDef[];
 
 /** Tools available on this OS. */

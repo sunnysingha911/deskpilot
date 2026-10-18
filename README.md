@@ -90,6 +90,24 @@ approvals and logging. Approvals show the whole chain (you → mac-helper → no
 marked as coming from another agent, and its answer comes back as untrusted data. Delegation goes at
 most two levels deep, never loops, and the called agent's tokens and time count against the caller's
 budget. Add `agent.delegate` to `approval.alwaysAsk` (*Ask me before each hand-off*) to approve each one.
+If anything in a run was declined, every further hand-off in that run asks you first, so a declined
+action can't be passed to a different agent.
+
+### Orchestrator and specialists
+
+`orchestrator` has no desktop tools: it posts a plan (shown as a live checklist), hands each part to
+the best-suited agent, checks the answers and combines them.
+
+| Agent | Tools | Notes |
+|---|---|---|
+| `coder` | `shell.run` | reads code, runs tests, writes in the scratch folder |
+| `security-auditor` | `shell.run`, `ui.list_apps` | read-only audit; asks before anything that isn't read-only |
+| `job-hunter` | `browser.*` | searches jobs in the isolated browser; never applies on its own |
+| `notes-reader` | read-only `ui.*` | Notes app layout, never note contents |
+
+```sh
+npm run agent -- orchestrator "How many apps are listening on TCP ports, and how many files are in tests/?"
+```
 
 ## Project docs
 

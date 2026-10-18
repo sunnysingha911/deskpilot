@@ -52,21 +52,66 @@ function stripHarmlessRedirects(cmd: string): string {
   return cmd.replace(/\d*>&\d+/g, " ").replace(/&?\d*>{1,2}\s*\/dev\/null/g, " ");
 }
 
+/**
+ * Blank out quoted text so a `>` or `|` inside quotes (e.g. awk 'NR>1') isn't read as shell syntax.
+ * Double-quoted text that can expand ($, `) is kept as is, and so is an unterminated quote.
+ */
+function maskQuotes(cmd: string): string {
+  return cmd.replace(/'[^']*'/g, "''").replace(/"(?:[^"\\$`]|\\.)*"/g, '""');
+}
+
+/** Split on unquoted |, ;, & and newlines. null = unbalanced quotes (don't vouch for it). */
+function splitSegments(cmd: string): string[] | null {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"') cur += cmd[++i] ?? "";
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+    } else if (c === "\\") {
+      cur += c + (cmd[++i] ?? "");
+    } else if ("|;&\n".includes(c)) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = "";
+    } else cur += c;
+  }
+  if (quote) return null;
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+/** An awk program that only reads: no system(), getline, pipes, or print/printf redirection. */
+function isReadOnlyAwk(segment: string): boolean {
+  if (/\s-f\b/.test(segment)) return false; // program in a file we haven't seen
+  const program = segment.match(/'([^']*)'/)?.[1];
+  if (program === undefined) return false;
+  return !/system\s*\(|getline|\|/.test(program) && !/\bprintf?\b[^;}]*>/.test(program);
+}
+
 export function classifyShell(command: string): Risk {
   const cmd = stripHarmlessRedirects(command);
   if (IRREVERSIBLE.some((re) => re.test(cmd))) return "irreversible";
+  const bare = maskQuotes(cmd);
   // Truncating redirect (`>` not `>>`) overwrites a file.
-  if (/(^|[^>])>(?!>)/.test(cmd)) return "irreversible";
-  if (/>>|\btee\b/.test(cmd)) return "reversible";
-  if (/\$\(|`/.test(cmd)) return "reversible"; // command substitution: don't vouch for it
+  if (/(^|[^>])>(?!>)/.test(bare)) return "irreversible";
+  if (/>>|\btee\b/.test(bare)) return "reversible";
+  if (/\$\(|`/.test(bare)) return "reversible"; // command substitution: don't vouch for it
 
-  const segments = cmd.split(/\|\||&&|[|;&\n]/).map((s) => s.trim()).filter(Boolean);
+  const segments = splitSegments(cmd);
+  if (!segments) return "reversible";
   const allReadOnly = segments.every((seg) => {
     const words = seg.replace(/^(\w+=\S*\s+)+/, "").split(/\s+/);
     const head = words[0] ?? "";
     if (/^(-v|-V|--version|version)$/.test(words[1] ?? "") && words.length === 2) return true;
     if (head === "git") return READ_ONLY_GIT.test(seg);
     if (head === "sed") return !/\s-i\b|\s--in-place/.test(seg);
+    if (head === "awk") return isReadOnlyAwk(seg);
     if (head === "sysctl") return !/\s-w\b|=/.test(seg);
     if (head === "defaults") return /^defaults\s+(read|domains|find)\b/.test(seg);
     return READ_ONLY_CMDS.has(head);

@@ -79,7 +79,9 @@ data/            SQLite DBs (gitignored)
   step/token budgets.
 - **Phase 3 — Windows backend, then Linux backend** (tested on user-provided VM/machine).
 - **Phase 4+ — Multiple agents and orchestrator**, memory, specialist definitions.
-  Started: agent-to-agent delegation (`agent.delegate`), @mentions, GUI picks and hand-offs.
+  Done so far: agent-to-agent delegation (`agent.delegate`), @mentions, GUI picks and hand-offs;
+  `orchestrator` (plans with `plan.update`, delegates to any agent, no desktop tools) and specialists
+  `coder`, `security-auditor`, `job-hunter`, `notes-reader`.
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
@@ -115,6 +117,11 @@ data/            SQLite DBs (gitignored)
   under the child run and forwarded to the parent as `{type:"sub", runId, agent, depth, event}`.
 - Approvals carry `chain`; in the GUI they surface on the top-level run (with `subRunId`).
 - Desktop actions never run in parallel: delegation is synchronous inside the one active run.
+- `canDelegateTo: ["*"]` = every other agent. An agent may have no tools only if it can delegate.
+- A declined action must not be re-routed: once any action in a run (or a run it called) is blocked,
+  every further `agent.delegate` call in that run needs approval. Results report `blockedActions`.
+- `approval.askAbove: "read_only"` asks before any action above read-only (whatever the tool).
+- `plan.update` (read-only, no side effects) becomes a `plan` run event; the GUI shows the latest.
 
 ## GUI invariants
 - Server binds 127.0.0.1 only; every /api call needs the per-launch token (header, or `?t=` for SSE);

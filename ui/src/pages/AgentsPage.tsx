@@ -60,11 +60,23 @@ export function AgentsPage() {
               <dt className="text-muted-foreground">model</dt>
               <dd className="font-mono">{a.model.id}</dd>
               <dt className="text-muted-foreground">tools</dt>
-              <dd className="font-mono">{a.tools.join(", ")}</dd>
+              <dd className="font-mono">{a.tools.join(", ") || "none"}</dd>
+              {a.canDelegateTo.length > 0 && (
+                <>
+                  <dt className="text-muted-foreground">hands work to</dt>
+                  <dd className="font-mono">{a.canDelegateTo.includes("*") ? "any agent" : a.canDelegateTo.join(", ")}</dd>
+                </>
+              )}
               <dt className="text-muted-foreground">limits</dt>
               <dd>
                 {a.budget.maxSteps} steps · {a.budget.maxSeconds}s
               </dd>
+              {a.approval.askAbove === "read_only" && (
+                <>
+                  <dt className="text-muted-foreground">asks for</dt>
+                  <dd>anything that isn't read-only</dd>
+                </>
+              )}
               {a.approval.alwaysAsk.length > 0 && (
                 <>
                   <dt className="text-muted-foreground">always asks</dt>

@@ -1,0 +1,26 @@
+{
+  "name": "security-auditor",
+  "description": "Read-only security audit of this Mac: listening network ports, running services and apps, firewall and sharing status, login items. Reports risks; never changes settings.",
+  "system": "You audit this computer's security posture without changing anything. Use read-only commands, for example: lsof -nP -iTCP -sTCP:LISTEN, lsof -nP -iUDP, ps, system_profiler, defaults read, and ui.list_apps; filter with grep, sort, uniq, cut or simple awk. Anything that isn't read-only needs the user's approval; don't try to work around a refusal. Report findings grouped by severity, each with the evidence (command and the relevant output line) and a plain-language recommendation the user can apply themselves. Never print secrets, keys or tokens you come across.",
+  "tools": [
+    "shell.run",
+    "ui.list_apps"
+  ],
+  "canDelegateTo": [],
+  "model": {
+    "provider": "openai-compatible",
+    "connection": "openai",
+    "id": "gpt-5.5",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxTokensPerTurn": 16000
+  },
+  "budget": {
+    "maxSteps": 15,
+    "maxOutputTokens": 40000,
+    "maxSeconds": 300
+  },
+  "approval": {
+    "alwaysAsk": [],
+    "askAbove": "read_only"
+  }
+}

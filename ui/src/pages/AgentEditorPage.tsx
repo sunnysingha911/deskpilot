@@ -33,6 +33,7 @@ interface FormValues {
   alwaysAsk: string[];
   canDelegateTo: string[];
   askDelegate: boolean;
+  readOnlyFreely: boolean;
 }
 
 /** The delegation tool isn't in the OS tool list, so its "ask" rule is kept separately. */
@@ -99,6 +100,7 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
       alwaysAsk: expand(source.approval.alwaysAsk, tools),
       canDelegateTo: source.canDelegateTo,
       askDelegate: source.approval.alwaysAsk.includes(DELEGATE_TOOL),
+      readOnlyFreely: source.approval.askAbove === "read_only",
     });
     setModels(modelCache.get(ownConnection(source)) ?? []);
   }, [source, tools, mode, reset]);
@@ -128,7 +130,10 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
       },
       budget: { maxSteps: Number(v.maxSteps), maxOutputTokens: Number(v.maxOutputTokens), maxSeconds: Number(v.maxSeconds) },
       canDelegateTo: v.canDelegateTo ?? [],
-      approval: { alwaysAsk: [...compress(v.alwaysAsk, tools), ...(v.askDelegate ? [DELEGATE_TOOL] : [])] },
+      approval: {
+        alwaysAsk: [...compress(v.alwaysAsk, tools), ...(v.askDelegate ? [DELEGATE_TOOL] : [])],
+        ...(v.readOnlyFreely && { askAbove: "read_only" }),
+      },
     };
   }
 
@@ -256,6 +261,10 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
           <p className="mt-1 mb-3 text-xs text-muted-foreground">
             Tick what this agent may use. <b>Ask</b> = needs your approval every time, even for reversible actions. Irreversible actions always ask.
           </p>
+          <label className="mb-3 flex cursor-pointer items-center gap-2 text-sm">
+            <Checkbox checked={!!watch("readOnlyFreely")} onCheckedChange={(v) => setValue("readOnlyFreely", !!v, { shouldDirty: true })} />
+            Only read-only actions run without asking (ask me before anything that changes something)
+          </label>
           <div className="space-y-4">
             {families.map((fam) => {
               const members = tools.filter((t) => familyOf(t.name) === fam);
@@ -298,7 +307,15 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
             Agents this one may pass sub-tasks to on its own. They use their own tools and model, and their actions still need your approval as usual. You can also allow
             others for a single run by writing <code className="font-mono">@agent-name</code> in the task.
           </p>
-          {others.length === 0 ? (
+          <label className="mb-2 flex cursor-pointer items-center gap-2 text-sm">
+            <Checkbox
+              checked={delegates.includes("*")}
+              onCheckedChange={(v) => setValue("canDelegateTo", v ? ["*"] : [], { shouldDirty: true })}
+            />
+            <b>Any agent</b>
+            <span className="text-xs text-muted-foreground">(for coordinators like the orchestrator; includes agents you add later)</span>
+          </label>
+          {delegates.includes("*") ? null : others.length === 0 ? (
             <p className="text-sm text-muted-foreground">No other agents yet.</p>
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(290px,1fr))] gap-x-6 gap-y-1">
