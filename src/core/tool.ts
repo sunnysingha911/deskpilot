@@ -13,6 +13,8 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** The task this call belongs to (desktop turn-taking, per-task browser tab). Missing = a one-off call. */
   task?: TaskInfo;
+  /** A tool that waits on the user (e.g. ask_user) reports that time here; it's left out of time budgets. */
+  addWait?: (ms: number) => void;
 }
 
 export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = z.ZodType> {

@@ -80,6 +80,17 @@ npm test                                               # unit tests (no network,
 
 Irreversible tool calls prompt `y/N` in an interactive terminal and are denied otherwise.
 
+## Talking with agents
+
+On the Run page (and a run's page) there's a chat box under the timeline: message an agent while it
+works ("skip the second site") and it reads it after its current step, or reply after it's done
+("now make it a table") to continue the same conversation. Agents can also ask you questions, with
+choices as buttons; they wait for your answer (that time doesn't count against their budget).
+
+On the desktop, hover an avatar to see its task, step, time and tokens (it looks at your cursor);
+click it to reply, answer its question, approve (press and hold) or deny, change priority, stop, or
+open the run. While you type in an avatar's reply box, agents' keyboard/mouse actions wait.
+
 ## Several tasks at once
 
 Start as many tasks as you like from the Run page (e.g. the coder, the job-hunter and a creative

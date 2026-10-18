@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Forward, Square, Users, Wrench } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 import { AttachmentList } from "@/components/Attachments";
+import { ChatBox } from "@/components/ChatBox";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
 import { StatusBadge } from "@/components/ui/badge";
@@ -115,7 +116,13 @@ export function RunDetailPage() {
           {r.final_text && <Card className="whitespace-pre-wrap">{r.final_text}</Card>}
         </div>
       ) : (
-        <Timeline events={stream.events} />
+        <>
+          <Timeline events={stream.events} />
+          {/* A delegated run is driven by its caller while it runs; once done, it can be followed up. */}
+          {(r.relation !== "delegate" || stream.done) && (
+            <ChatBox runId={stream.currentRunId ?? r.id} agent={r.agent} running={!stream.done && d.active} onFollowUp={(id) => nav(`/runs/${id}`)} />
+          )}
+        </>
       )}
     </>
   );

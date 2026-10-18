@@ -46,7 +46,8 @@ export interface FileInputs {
 
 export type TurnInput =
   | { kind: "user"; text: string; files?: InlineFile[] | undefined }
-  | { kind: "tool_results"; results: ToolResultInput[] }
+  /** note: messages the user sent while the agent worked, delivered along with the results. */
+  | { kind: "tool_results"; results: ToolResultInput[]; note?: string | undefined }
   /** Re-send as-is (after a provider-side pause). */
   | { kind: "continue" };
 
@@ -89,7 +90,11 @@ export interface ModelSession {
 
 export interface ModelProvider {
   readonly id: string;
-  startSession(opts: SessionOptions): ModelSession;
+  /**
+   * history: a native transcript from an earlier session with the same provider (a follow-up keeps
+   * the conversation). It must end with the model's final answer.
+   */
+  startSession(opts: SessionOptions, history?: unknown[]): ModelSession;
   /** Which attachments this model can be shown directly. Missing = none (it reads them with file.read). */
   fileInputs?(model: string): Promise<FileInputs>;
 }

@@ -4,6 +4,7 @@
 import { listSet, setExists, type AttachmentSet } from "../core/attachments.ts";
 import { randomUUID } from "node:crypto";
 import { handoffTaskMessage, type ParentLink } from "../agent/delegate.ts";
+import type { Interaction, Question } from "../agent/interaction.ts";
 import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../agent/definition.ts";
 import { newRunId, runAgent, type RunEvent } from "../agent/runner.ts";
 import { Executor, type ApprovalDecision, type ApprovalRequest, type Approver } from "../core/executor.ts";
@@ -40,7 +41,19 @@ interface Active {
   pending: Map<string, Pending>;
   /** Settles when the task has finished (including cleanup). */
   done?: Promise<void>;
+  /** Messages from the user not yet delivered to the agent. */
+  inbox: string[];
+  /** Questions the agent (or an agent it called) is waiting on. */
+  questions: Map<string, PendingQuestion>;
 }
+
+interface PendingQuestion {
+  q: Question;
+  resolve: (r: { answer: string | null; by: string }) => void;
+  timer: NodeJS.Timeout;
+}
+
+const MAX_MESSAGE_CHARS = 8000;
 
 /** Safety cap on tasks running at once (each one costs model calls). */
 export const MAX_ACTIVE_RUNS = 10;
@@ -54,6 +67,7 @@ export interface ActiveRunView {
   mode: RunMode;
   priority: Priority;
   pendingApprovals: number;
+  pendingQuestions: number;
 }
 
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -75,6 +89,8 @@ export interface StartRequest {
   fromRun?: string | undefined;
   /** Upload folder id (POST /api/uploads) of the files attached to this task. */
   attachments?: string | undefined;
+  /** Continue this finished run's conversation (the task is the user's next message). */
+  followUp?: string | undefined;
   /** How this task shares the desktop with others (default "optimized"). */
   mode?: RunMode | undefined;
   /** Who gets the desktop first in optimized mode (default "normal"). */
@@ -120,6 +136,7 @@ export class RunManager {
       mode: a.mode,
       priority: a.priority,
       pendingApprovals: a.pending.size,
+      pendingQuestions: a.questions.size,
     }));
   }
 
@@ -131,6 +148,53 @@ export class RunManager {
     const a = this.find(runId);
     if (!a || a.runId !== runId) return [];
     return [...a.pending.entries()].map(([id, p]) => ({ id, ...p.req }));
+  }
+
+  pendingQuestions(runId: string) {
+    const a = this.find(runId);
+    if (!a || a.runId !== runId) return [];
+    return [...a.questions.entries()].map(([id, p]) => ({ id, ...p.q }));
+  }
+
+  /**
+   * A message from the user. A running task gets it after its current step; a finished run is
+   * continued as a follow-up (same agent, same conversation when possible).
+   */
+  sendMessage(runId: string, text: string): { queued: true; runId: string } | { followUpRunId: string } {
+    const t = text.trim().slice(0, MAX_MESSAGE_CHARS);
+    if (!t) throw new Error("message is empty");
+    const a = this.find(runId);
+    if (a) {
+      a.inbox.push(t);
+      this.publish(a.runId, { type: "user_message", text: t });
+      return { queued: true, runId: a.runId };
+    }
+    const prev = this.logger.getRun(runId);
+    if (!prev) throw Object.assign(new Error("no such run"), { status: 404 });
+    return { followUpRunId: this.start({ agent: String(prev.agent), task: t, followUp: runId }).runId };
+  }
+
+  /** The user's answer to an agent's question. */
+  answer(runId: string, questionId: string, answer: string, by = "user:gui"): boolean {
+    const a = this.find(runId);
+    const p = a?.questions.get(questionId);
+    if (!a || !p) return false;
+    const text = answer.trim().slice(0, MAX_MESSAGE_CHARS);
+    if (!text) return false;
+    clearTimeout(p.timer);
+    a.questions.delete(questionId);
+    p.resolve({ answer: text, by });
+    this.publish(a.runId, { type: "question_answered", id: questionId, answer: text, by });
+    return true;
+  }
+
+  private dropQuestion(a: Active, id: string, by: string): void {
+    const p = a.questions.get(id);
+    if (!p) return;
+    clearTimeout(p.timer);
+    a.questions.delete(id);
+    p.resolve({ answer: null, by });
+    this.publish(a.runId, { type: "question_answered", id, answer: null, by });
   }
 
   /** Change a running task's priority (takes effect at its next desktop turn). */
@@ -179,7 +243,7 @@ export class RunManager {
     if (this.actives.size >= MAX_ACTIVE_RUNS) {
       throw Object.assign(new Error(`${MAX_ACTIVE_RUNS} tasks are already running; stop one or wait for one to finish`), { status: 409 });
     }
-    const def = loadAgent(req.agent);
+    let def = loadAgent(req.agent);
     const known = listAgents().map((a) => a.name);
     for (const n of req.with ?? []) if (!known.includes(n)) throw new Error(`unknown agent '${n}'`);
     const userAllowed = [...new Set([...(req.with ?? []), ...parseMentions(req.task, known, def.name)])].filter((n) => n !== def.name);
@@ -194,14 +258,56 @@ export class RunManager {
       parent = { runId: req.fromRun, relation: "handoff" };
     }
 
+    // Follow-up: continue a finished run's conversation with the same agent.
+    let history: unknown[] | undefined;
+    let historyProvider: string | undefined;
+    let followUpFiles: string | undefined;
+    if (req.followUp) {
+      const prev = this.logger.getRun(req.followUp);
+      if (!prev) throw Object.assign(new Error(`no such run '${req.followUp}'`), { status: 404 });
+      if (this.find(req.followUp)) throw new Error("that task is still running: send it a message instead");
+      def = loadAgent(String(prev.agent));
+      parent = { runId: req.followUp, relation: "followup" };
+      if (typeof prev.attachments === "string") followUpFiles = prev.attachments;
+      // Only a finished conversation can be resumed natively; otherwise pass the earlier answer as data.
+      if (prev.status === "completed" && typeof prev.transcript_json === "string") {
+        try {
+          const t = JSON.parse(prev.transcript_json);
+          if (Array.isArray(t) && t.length) {
+            history = t;
+            historyProvider = String(prev.provider);
+          }
+        } catch {
+          /* cut off in the log: fall back to the answer */
+        }
+      }
+      if (!history && typeof prev.final_text === "string" && prev.final_text) {
+        task = handoffTaskMessage(req.task, { agent: String(prev.agent), runId: req.followUp, finalText: prev.final_text });
+      }
+    }
+
     let attachmentSet: AttachmentSet | undefined;
+    if (!req.attachments && followUpFiles && setExists(followUpFiles)) {
+      const set = listSet(followUpFiles);
+      if (set.files.length) attachmentSet = set;
+    }
     if (req.attachments) {
       if (!setExists(req.attachments)) throw new Error("those attachments are gone; attach the files again");
       const set = listSet(req.attachments);
       if (set.files.length) attachmentSet = set;
     }
 
-    const attempts = this.plan(def, req);
+    let attempts = this.plan(def, req);
+    if (history) {
+      // A native transcript only works with the provider that wrote it, so no fallback to others.
+      const same = attempts.filter((a) => a.conn.kind === historyProvider);
+      if (same.length) attempts = same.slice(0, 1);
+      else {
+        history = undefined;
+        const prev = this.logger.getRun(req.followUp!)!;
+        if (typeof prev.final_text === "string" && prev.final_text) task = handoffTaskMessage(req.task, { agent: String(prev.agent), runId: req.followUp!, finalText: prev.final_text });
+      }
+    }
     const firstConn = attempts[0]!.conn;
     if (!keyIsSet(firstConn) && attempts.length === 1) throw new Error(`${firstConn.label}: ${firstConn.keyEnv} is not set`);
 
@@ -216,10 +322,34 @@ export class RunManager {
       priority: req.priority ?? "normal",
       controller: new AbortController(),
       pending: new Map(),
+      inbox: [],
+      questions: new Map(),
     };
     this.actives.set(runId, active);
     const taskInfo: TaskInfo = { id: runId, mode: active.mode, priority: () => active.priority };
+    const interaction: Interaction = {
+      // Messages go to the top-level agent (its current attempt); called agents just ask.
+      takeMessages: (rid) => (rid === active.runId ? active.inbox.splice(0) : []),
+      ask: (q, signal) =>
+        new Promise((resolve) => {
+          const id = randomUUID().slice(0, 8);
+          const timer = setTimeout(() => this.dropQuestion(active, id, "policy:timeout"), APPROVAL_TIMEOUT_MS);
+          active.questions.set(id, { q, resolve, timer });
+          signal?.addEventListener("abort", () => this.dropQuestion(active, id, "policy:stopped"), { once: true });
+          this.publish(active.runId, {
+            type: "question",
+            id,
+            agent: q.agent,
+            question: q.question,
+            ...(q.choices && { choices: q.choices }),
+            ...(q.runId !== active.runId && { subRunId: q.runId }),
+          });
+        }),
+    };
     this.presence?.arrive(runId, runId, def.name, 0);
+    this.presence?.describe(runId, req.task);
+    // A follow-up's task is the user's reply: show it in the conversation.
+    if (req.followUp) this.publish(runId, { type: "user_message", text: req.task, followUpOf: req.followUp });
 
     const approver: Approver = (r) =>
       new Promise<ApprovalDecision>((resolve) => {
@@ -285,8 +415,11 @@ export class RunManager {
             delegation: { loadAgent, providerFor: providerForAgent, userAllowed, listAgents: () => listAgents().map((a) => a.name) },
             signal: active.controller.signal,
             task: taskInfo,
+            interaction,
+            history,
             onEvent: (e, id) => this.publish(currentRunId, e, id),
-            attachments: attachmentSet && { set: attachmentSet, showToModel: true },
+            // A follow-up's files were already shown to the model in the earlier run.
+            attachments: attachmentSet && { set: attachmentSet, showToModel: !req.followUp },
           });
           // Fall back only if nothing happened yet: no step finished, so no tool can have run.
           const canFallBack = result.status === "error" && result.steps === 0 && i + 1 < attempts.length && !active.controller.signal.aborted;
@@ -299,6 +432,7 @@ export class RunManager {
         this.publish(currentRunId, { type: "end", summary: { status: "error", steps: 0, error: err instanceof Error ? err.message : String(err) } });
       } finally {
         for (const [id] of active.pending) this.decide(active.runId, id, false, "policy:run-ended");
+        for (const [id] of active.questions) this.dropQuestion(active, id, "policy:run-ended");
         await endTask(taskInfo.id); // e.g. close the task's browser tabs
         this.publish(currentRunId, { type: "closed" });
         this.actives.delete(active.rootKey);
@@ -320,7 +454,8 @@ export class RunManager {
 
   decide(runId: string, approvalId: string, approved: boolean, by = "user:gui"): boolean {
     const a = this.find(runId);
-    if (!a || a.runId !== runId) return false;
+    if (!a) return false;
+    runId = a.runId;
     const p = a.pending.get(approvalId);
     if (!p) return false;
     clearTimeout(p.timer);

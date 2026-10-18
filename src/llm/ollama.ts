@@ -67,8 +67,9 @@ class OllamaSession implements ModelSession {
     private root: string,
     private cfg: Required<Pick<OllamaOptions, "contextLength" | "keepAlive">>,
     private opts: SessionOptions,
+    history?: unknown[],
   ) {
-    this.messages = [{ role: "system", content: opts.system }];
+    this.messages = [{ role: "system", content: opts.system }, ...((history ?? []) as WireMessage[]).filter((m) => m.role !== "system")];
     this.tools = toOllamaTools(opts.tools);
     this.fromWire = new Map(opts.tools.map((t) => [toWireName(t.name), t.name]));
   }
@@ -108,6 +109,7 @@ class OllamaSession implements ModelSession {
       for (const r of input.results) {
         this.messages.push({ role: "tool", content: r.content, tool_name: this.callNames.get(r.id) ?? "", tool_call_id: r.id });
       }
+      if (input.note) this.messages.push({ role: "user", content: input.note });
     }
 
     let pruned = 0;
@@ -201,8 +203,8 @@ export class OllamaProvider implements ModelProvider {
     this.cfg = { contextLength: opts.contextLength ?? DEFAULT_OLLAMA_CONTEXT, keepAlive: opts.keepAlive ?? "30m" };
   }
 
-  startSession(opts: SessionOptions): ModelSession {
-    return new OllamaSession(this.root, this.cfg, opts);
+  startSession(opts: SessionOptions, history?: unknown[]): ModelSession {
+    return new OllamaSession(this.root, this.cfg, opts, history);
   }
 
   /** Images only for models with the "vision" capability (asked from the local server; free). */

@@ -54,7 +54,9 @@ class AnthropicSession implements ModelSession {
   constructor(
     private client: Anthropic,
     private opts: SessionOptions,
+    history?: unknown[],
   ) {
+    if (history) this.messages = [...(history as MessageParam[])];
     this.tools = toAnthropicTools(opts.tools);
     this.fromWire = new Map(opts.tools.map((t) => [toWireName(t.name), t.name]));
   }
@@ -87,12 +89,15 @@ class AnthropicSession implements ModelSession {
       // All results for one assistant turn go back in a single user message.
       this.messages.push({
         role: "user",
-        content: input.results.map((r) => ({
-          type: "tool_result" as const,
-          tool_use_id: r.id,
-          content: r.content,
-          is_error: r.isError,
-        })),
+        content: [
+          ...input.results.map((r) => ({
+            type: "tool_result" as const,
+            tool_use_id: r.id,
+            content: r.content,
+            is_error: r.isError,
+          })),
+          ...(input.note ? [{ type: "text" as const, text: input.note }] : []),
+        ],
       });
     }
 
@@ -166,8 +171,8 @@ export class AnthropicProvider implements ModelProvider {
     });
   }
 
-  startSession(opts: SessionOptions): ModelSession {
-    return new AnthropicSession(this.client, opts);
+  startSession(opts: SessionOptions, history?: unknown[]): ModelSession {
+    return new AnthropicSession(this.client, opts, history);
   }
 
   async fileInputs(): Promise<FileInputs> {

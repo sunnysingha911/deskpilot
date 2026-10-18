@@ -18,6 +18,7 @@ import {
   type ParentLink,
 } from "./delegate.ts";
 import { needsAlwaysAsk, resolveTools, type AgentDefinition } from "./definition.ts";
+import { ASK_USER_TOOL, makeAskUserTool, userMessagesNote, type Interaction } from "./interaction.ts";
 import { DEFAULT_PRUNE, type PrunePolicy } from "../llm/prune.ts";
 import { makeResultMoreTool, RESULT_MORE_TOOL } from "../tools/result.ts";
 import { buildSystemPrompt, formatToolResult, SpillStore, type FormatStats } from "./prompt.ts";
@@ -34,6 +35,8 @@ export type RunEvent =
   | { type: "delegate_end"; runId: string; agent: string; status: string; steps: number; error?: string | undefined }
   /** An event of a delegated (nested) run, forwarded into the parent's timeline. */
   | { type: "sub"; runId: string; agent: string; depth: number; event: RunEvent }
+  /** Messages the user sent while the agent worked reached the model. */
+  | { type: "user_message_delivered"; count: number }
   /** Context kept out of the model's input in this run (estimates; chars ≈ 4 per token). */
   | { type: "savings"; compactTokens: number; spilledTokens: number; prunedTokens: number }
   | { type: "end"; summary: RunSummary };
@@ -60,6 +63,10 @@ export interface RunDeps {
   attachments?: { set: AttachmentSet; showToModel: boolean } | undefined;
   /** The task this run belongs to (shared with the runs it delegates to): desktop turns, browser tab. */
   task?: TaskInfo | undefined;
+  /** Lets the user message the agent while it works, and the agent ask the user (ask_user). */
+  interaction?: Interaction | undefined;
+  /** Native transcript of an earlier run to continue (a follow-up); the task is the user's next message. */
+  history?: unknown[] | undefined;
   /** Stale-observation pruning (default DEFAULT_PRUNE); false turns it off, e.g. to compare token use. */
   prune?: PrunePolicy | false | undefined;
 }
@@ -95,7 +102,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
   let waitedMs = 0;
   const busySeconds = () => (Date.now() - started - waitedMs) / 1000;
 
-  const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL && t.name !== FILE_READ_TOOL && t.name !== RESULT_MORE_TOOL);
+  const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL && t.name !== FILE_READ_TOOL && t.name !== RESULT_MORE_TOOL && t.name !== ASK_USER_TOOL);
   const runTools: ToolDef[] = [];
   const att = deps.attachments?.set.files.length ? deps.attachments : undefined;
   // Images/PDFs the model can view go along with the task; everything stays readable with file.read.
@@ -108,6 +115,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     }
   }
   if (att) runTools.push(makeFileReadTool(att.set, inline.map((f) => f.name)));
+  if (deps.interaction) runTools.push(makeAskUserTool(deps.interaction, def.name));
   if (deps.delegation) {
     const delegateTool = makeDelegateTool(def, deps.delegation, {
       parentRunId: runId,
@@ -145,7 +153,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     effort: def.model.effort,
     prune: deps.prune === false ? undefined : (deps.prune ?? DEFAULT_PRUNE),
     cacheKey: def.name,
-  });
+  }, deps.history);
 
   const firstText = att
     ? `${task}\n\n${attachmentsNote(att.set, { shownToModel: inline.map((f) => f.name), canDelegate: runTools.some((t) => t.name === DELEGATE_TOOL) })}`
@@ -189,6 +197,14 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
         break;
       }
 
+      // Messages the user sent since the last step go along with the tool results.
+      if (input.kind === "tool_results" && deps.interaction) {
+        const msgs = deps.interaction.takeMessages(runId);
+        if (msgs.length) {
+          input = { ...input, note: userMessagesNote(msgs) };
+          emit({ type: "user_message_delivered", count: msgs.length });
+        }
+      }
       const turn = await session.next(input);
       steps++;
       usage.inputTokens += turn.usage.inputTokens;
@@ -218,6 +234,13 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
         continue;
       }
       if (turn.toolCalls.length === 0) {
+        // The user wrote while the agent was finishing: answer that before calling it done.
+        const late = deps.interaction?.takeMessages(runId) ?? [];
+        if (late.length) {
+          emit({ type: "user_message_delivered", count: late.length });
+          input = { kind: "user", text: userMessagesNote(late) };
+          continue;
+        }
         status = "completed";
         finalText = turn.text;
         break;
@@ -347,6 +370,8 @@ function makeDelegateTool(
         attachments: run.deps.attachments && { set: run.deps.attachments.set, showToModel: false },
         prune: run.deps.prune,
         task: run.deps.task,
+        // Called agents may ask the user too (messages go to the top-level agent only).
+        interaction: run.deps.interaction,
         // Nested runs' events already arrive wrapped; pass those through unchanged.
         onEvent: (e) => run.emit(e.type === "sub" ? e : { type: "sub", runId: childRunId, agent: target.name, depth, event: e }),
       });

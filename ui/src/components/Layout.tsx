@@ -59,9 +59,9 @@ export function Layout() {
 
 /** "3 running", plus a warning for tasks waiting for approval (each links to its run). */
 function RunningSummary({ runs }: { runs: Meta["activeRuns"] }) {
-  const waiting = runs.filter((r) => r.pendingApprovals > 0);
+  const waiting = runs.filter((r) => r.pendingApprovals > 0 || r.pendingQuestions > 0);
   useEffect(() => {
-    document.title = waiting.length ? `⚠️ ${waiting.length === 1 ? "Approval" : `${waiting.length} approvals`} needed · deskpilot` : runs.length ? `${runs.length} running · deskpilot` : "deskpilot";
+    document.title = waiting.length ? `⚠️ ${waiting.length === 1 ? "1 agent needs" : `${waiting.length} agents need`} you · deskpilot` : runs.length ? `${runs.length} running · deskpilot` : "deskpilot";
   }, [waiting.length, runs.length]);
   if (!runs.length) return <div>idle</div>;
   return (
@@ -71,7 +71,7 @@ function RunningSummary({ runs }: { runs: Meta["activeRuns"] }) {
       </Link>
       {waiting.map((r) => (
         <Link key={r.runId} className="font-medium text-bad hover:underline" to={`/runs/${r.runId}`}>
-          ⚠ {r.agent} needs your OK
+          ⚠ {r.agent} {r.pendingApprovals > 0 ? "needs your OK" : "has a question"}
         </Link>
       ))}
     </div>

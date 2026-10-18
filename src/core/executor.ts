@@ -81,10 +81,10 @@ export class Executor {
       askAbove?: Risk | undefined;
     } = {},
   ): Promise<ToolResult> {
-    const fullCtx: ToolContext = { caller: "unknown", sessionId: randomUUID(), ...ctx };
+    let waitedMs = 0;
+    const fullCtx: ToolContext = { caller: "unknown", sessionId: randomUUID(), ...ctx, addWait: (ms) => (waitedMs += Math.max(0, Math.round(ms))) };
     const started = performance.now();
     const tool = this.tools.get(name);
-    let waitedMs = 0;
 
     const finish = (
       status: ActionStatus,

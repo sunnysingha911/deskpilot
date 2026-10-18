@@ -12,6 +12,7 @@ import { AGENTS_DIR, AgentDefinition, listAgents, loadAgent } from "../agent/def
 import { AvatarLook, defaultLook } from "../agent/schema.ts";
 import { addStream, AttachmentError, createSet, MAX_FILE_BYTES, getAttachment, listSet, removeAttachment, setExists, SET_ID_RE } from "../core/attachments.ts";
 import { ActionLogger } from "../core/logger.ts";
+import { desktopLock, USER_TASK_ID } from "../core/desktop-lock.ts";
 import { PRIORITIES, RUN_MODES, type Priority, type RunMode } from "../core/task.ts";
 import { DATA_DIR, ROOT } from "../core/paths.ts";
 import { getConnection, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
@@ -22,6 +23,12 @@ import { RunManager } from "./runs.ts";
 /** The React UI's production build (npm run build:ui). A desktop shell can load the same folder. */
 export const UI_DIST = join(ROOT, "ui", "dist");
 const MAX_BODY = 1024 * 1024;
+/** Approving from a desktop avatar needs a press-and-hold this long, so a stray (or an agent's) click can't. */
+export const OVERLAY_HOLD_MS = 800;
+/** ...and no agent may have clicked or typed for this long before it. */
+export const OVERLAY_QUIET_MS = 1500;
+/** The reply box on the desktop gives the desktop back after this long without activity. */
+const TYPING_TIMEOUT_MS = 90_000;
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 class HttpError extends Error {
@@ -125,6 +132,34 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
   const presence = new PresenceTracker(lookFor, opts.presenceTiming);
   const runs = new RunManager(logger, presence);
   let port = 0;
+
+  // While the user types into an avatar's reply box, the desktop belongs to them.
+  let typing: { release: () => void; timer: NodeJS.Timeout } | null = null;
+  const stopTyping = () => {
+    if (!typing) return;
+    clearTimeout(typing.timer);
+    typing.release();
+    typing = null;
+  };
+  let typingStarting: Promise<void> | null = null;
+  const startTyping = async (): Promise<void> => {
+    if (typing) {
+      typing.timer.refresh();
+      return;
+    }
+    if (typingStarting) return typingStarting;
+    typingStarting = holdForTyping().finally(() => (typingStarting = null));
+    return typingStarting;
+  };
+  const holdForTyping = async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let granted!: () => void;
+    const got = new Promise<void>((r) => (granted = r));
+    void desktopLock().run({ id: USER_TASK_ID, mode: "parallel", priority: () => "high" }, () => (granted(), held));
+    await got;
+    typing = { release, timer: setTimeout(stopTyping, TYPING_TIMEOUT_MS) };
+  };
 
   const authorized = (req: IncomingMessage, url: URL): boolean => {
     const given = (req.headers["x-deskpilot-token"] as string | undefined) ?? url.searchParams.get("t") ?? "";
@@ -239,6 +274,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
         children: logger.childRuns(m[1]!),
         active: runs.isActive(m[1]!),
         pendingApprovals: runs.pendingApprovals(m[1]!),
+        pendingQuestions: runs.pendingQuestions(m[1]!),
         actions: logger.queryActions({ sessionId: m[1]!, limit: 1000 }).reverse(),
       };
     }],
@@ -268,8 +304,41 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     ["POST", /^\/api\/runs\/([\w-]+)\/approvals\/([\w-]+)$/, async (req, _res, m) => {
       const b = await readJson(req);
       if (typeof b.approved !== "boolean") throw new HttpError(400, "approved must be true or false");
-      if (!runs.decide(m[1]!, m[2]!, b.approved)) throw new HttpError(404, "no such pending approval");
+      // The desktop overlay is clickable by anything that moves the mouse, agents included: an approval
+      // from there needs a held press and a desktop no agent is driving right now.
+      if (b.via === "overlay" && b.approved) {
+        if (typeof b.heldMs !== "number" || b.heldMs < OVERLAY_HOLD_MS) throw new HttpError(400, "press and hold Approve");
+        if (desktopLock().quietFor() < OVERLAY_QUIET_MS) throw new HttpError(409, "an agent is using the keyboard or mouse right now; try again in a moment");
+      }
+      const by = b.via === "overlay" ? "user:overlay" : "user:gui";
+      if (!runs.decide(m[1]!, m[2]!, b.approved, by)) throw new HttpError(404, "no such pending approval");
       return { ok: true };
+    }],
+    ["POST", /^\/api\/runs\/([\w-]+)\/questions\/([\w-]+)$/, async (req, _res, m) => {
+      const b = await readJson(req);
+      if (typeof b.answer !== "string" || !b.answer.trim()) throw new HttpError(400, "answer is required");
+      if (!runs.answer(m[1]!, m[2]!, b.answer, b.via === "overlay" ? "user:overlay" : "user:gui")) throw new HttpError(404, "no such open question");
+      return { ok: true };
+    }],
+    // A message for a running agent (delivered after its current step), or a follow-up to a finished run.
+    ["POST", /^\/api\/runs\/([\w-]+)\/messages$/, async (req, _res, m) => {
+      const b = await readJson(req);
+      if (typeof b.text !== "string" || !b.text.trim()) throw new HttpError(400, "text is required");
+      try {
+        return runs.sendMessage(m[1]!, b.text);
+      } catch (err) {
+        throw new HttpError((err as { status?: number }).status ?? 400, err instanceof Error ? err.message : String(err));
+      }
+    }],
+    // The reply box on a desktop avatar takes keyboard focus: hold the desktop so no agent types meanwhile.
+    ["POST", /^\/api\/overlay\/typing$/, async (req) => {
+      const b = await readJson(req);
+      if (b.on === true) {
+        await startTyping();
+        return { holding: true };
+      }
+      stopTyping();
+      return { holding: false };
     }],
     ["GET", /^\/api\/runs\/([\w-]+)\/events$/, (req, res, m, url) => {
       const runId = m[1]!;
@@ -404,6 +473,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     url: `http://127.0.0.1:${port}/?t=${token}`,
     token,
     close: async () => {
+      stopTyping();
       await runs.shutdown();
       await new Promise<void>((resolve) => {
         presence.close();

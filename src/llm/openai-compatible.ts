@@ -74,8 +74,10 @@ class OpenAICompatibleSession implements ModelSession {
   constructor(
     private cfg: { baseUrl: string; apiKey: string | undefined },
     private opts: SessionOptions,
+    history?: unknown[],
   ) {
-    this.messages = [{ role: "system", content: opts.system }];
+    // A follow-up keeps the earlier conversation under the current system prompt.
+    this.messages = [{ role: "system", content: opts.system }, ...((history ?? []) as WireMessage[]).filter((m) => m.role !== "system")];
     this.tools = toOpenAITools(opts.tools);
     this.fromWire = new Map(opts.tools.map((t) => [toWireName(t.name), t.name]));
   }
@@ -143,6 +145,7 @@ class OpenAICompatibleSession implements ModelSession {
     } else if (input.kind === "tool_results") {
       // No is_error field in this API; the content itself starts with ERROR / BLOCKED.
       for (const r of input.results) this.messages.push({ role: "tool", tool_call_id: r.id, content: r.content });
+      if (input.note) this.messages.push({ role: "user", content: input.note });
     }
 
     let pruned = 0;
@@ -235,8 +238,8 @@ class OpenAICompatibleSession implements ModelSession {
 export class OpenAICompatibleProvider implements ModelProvider {
   readonly id = "openai-compatible";
   constructor(private cfg: { baseUrl: string; apiKey: string | undefined }) {}
-  startSession(opts: SessionOptions): ModelSession {
-    return new OpenAICompatibleSession(this.cfg, opts);
+  startSession(opts: SessionOptions, history?: unknown[]): ModelSession {
+    return new OpenAICompatibleSession(this.cfg, opts, history);
   }
 
   /** Most servers here take images; a model without vision gets the text instead (see next()). */

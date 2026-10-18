@@ -8,7 +8,7 @@ export type ActionStatus = "ok" | "error" | "blocked";
 export type RunStatus = "completed" | "refused" | "max_tokens" | "budget_exhausted" | "stopped" | "error";
 
 /** How a run relates to the run that started it. */
-export type RunRelation = "delegate" | "handoff";
+export type RunRelation = "delegate" | "handoff" | "followup";
 
 export interface RunSummary {
   status: RunStatus;

@@ -2,7 +2,7 @@
 // short status line. Status lines are our own wording (tool and agent names), never model output.
 import { type AvatarLook } from "../agent/schema.ts";
 
-export const MOODS = ["idle", "thinking", "working", "talking", "waiting", "worried", "sad", "happy", "frustrated", "waving"] as const;
+export const MOODS = ["idle", "thinking", "working", "talking", "waiting", "worried", "asking", "sad", "happy", "frustrated", "waving"] as const;
 export type Mood = (typeof MOODS)[number];
 
 export interface Presence {
@@ -17,6 +17,13 @@ export interface Presence {
   depth: number;
   /** Disintegrating into dust; removed after the exit animation. */
   leaving: boolean;
+  /** What it's waiting on you for (ids only: the question text stays in the run, never in this feed). */
+  pending?: { kind: "approval"; id: string; tool: string } | { kind: "question"; id: string; choices: number } | undefined;
+  /** The user's own task text (top-level agents only; delegated tasks are agent-written). */
+  task?: string | undefined;
+  startedAt: number;
+  steps: number;
+  outputTokens: number;
 }
 
 export interface PresenceState {
@@ -84,7 +91,15 @@ export class PresenceTracker {
 
   /** Bring an agent on stage (it gathers from magic dust). */
   arrive(key: string, rootRunId: string, agent: string, depth: number, mood: Mood = "idle", status = "on my way"): void {
-    this.avatars.set(key, { key, rootRunId, agent, look: this.lookFor(agent), mood, status, depth, leaving: false });
+    this.avatars.set(key, { key, rootRunId, agent, look: this.lookFor(agent), mood, status, depth, leaving: false, startedAt: Date.now(), steps: 0, outputTokens: 0 });
+    this.notify();
+  }
+
+  /** Attach the user's task text to a top-level avatar (shown on hover). */
+  describe(key: string, task: string): void {
+    const a = this.avatars.get(key);
+    if (!a) return;
+    a.task = short(task, 200);
     this.notify();
   }
 
@@ -117,14 +132,34 @@ export class PresenceTracker {
   apply(rootKey: string, e: Ev): void {
     if (e.type === "approval_request") {
       const key = typeof e.subRunId === "string" && this.avatars.has(e.subRunId) ? e.subRunId : rootKey;
+      const a = this.avatars.get(key);
+      if (a) a.pending = { kind: "approval", id: String(e.id), tool: String(e.tool) };
       return this.set(key, "worried", `needs your OK: ${e.tool}`);
     }
     if (e.type === "approval_resolved") {
       for (const a of this.avatars.values()) {
-        if (a.rootRunId === rootKey && a.mood === "worried") this.set(a.key, e.approved ? "working" : "sad", e.approved ? "thanks, continuing" : "okay, I won't");
+        if (a.rootRunId !== rootKey) continue;
+        if (a.pending?.kind === "approval" && a.pending.id === e.id) a.pending = undefined;
+        if (a.mood === "worried") this.set(a.key, e.approved ? "happy" : "sad", e.approved ? "thanks!" : "okay, I won't");
       }
       return;
     }
+    if (e.type === "question") {
+      const key = typeof e.subRunId === "string" && this.avatars.has(e.subRunId) ? e.subRunId : rootKey;
+      const a = this.avatars.get(key);
+      if (a) a.pending = { kind: "question", id: String(e.id), choices: Array.isArray(e.choices) ? e.choices.length : 0 };
+      return this.set(key, "asking", "has a question for you");
+    }
+    if (e.type === "question_answered") {
+      for (const a of this.avatars.values()) {
+        if (a.rootRunId !== rootKey || a.pending?.kind !== "question" || a.pending.id !== e.id) continue;
+        a.pending = undefined;
+        this.set(a.key, e.answer === null ? "thinking" : "happy", e.answer === null ? "no answer, carrying on" : "thanks!");
+      }
+      return;
+    }
+    if (e.type === "user_message") return this.set(rootKey, "talking", "got your message");
+    if (e.type === "user_message_delivered") return this.set(rootKey, "thinking", "reading your message");
     if (e.type === "closed") {
       for (const a of this.avatars.values()) if (a.rootRunId === rootKey) this.leave(a.key, this.timing.leaveAfterEndMs);
       this.inputDepth = 0;
@@ -141,6 +176,15 @@ export class PresenceTracker {
         return this.applyRun(rootKey, e.runId, e.depth, e.event);
       case "start":
         return this.set(key, "thinking", "getting started");
+      case "turn": {
+        const a = this.avatars.get(key);
+        if (a) {
+          a.steps = Number(e.step) || a.steps + 1;
+          a.outputTokens += Number(e.usage?.outputTokens) || 0;
+          this.notify();
+        }
+        return;
+      }
       case "thinking":
         return this.set(key, "thinking", "thinking…");
       case "text":
@@ -186,12 +230,13 @@ export class PresenceTracker {
   /** Play a short show of expressions (Agent editor → "Preview on desktop"). */
   preview(agent: string, look: AvatarLook): void {
     const key = `preview-${agent}-${Date.now()}`;
-    this.avatars.set(key, { key, rootRunId: "", agent, look, mood: "waving", status: "hi, I'm " + agent, depth: 0, leaving: false });
+    this.avatars.set(key, { key, rootRunId: "", agent, look, mood: "waving", status: "hi, I'm " + agent, depth: 0, leaving: false, startedAt: Date.now(), steps: 0, outputTokens: 0 });
     this.notify();
     const steps: Array<[Mood, string]> = [
       ["thinking", "thinking…"],
       ["working", "running a command"],
       ["worried", "needs your OK"],
+      ["asking", "has a question for you"],
       ["sad", "okay, I won't"],
       ["frustrated", "hit a snag"],
       ["happy", "all done!"],

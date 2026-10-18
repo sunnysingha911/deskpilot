@@ -1,7 +1,7 @@
 // Run workflow timeline, shared by the live view and run history. Every value from a run is
 // rendered as React text (escaped); run output is untrusted and must never become HTML.
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRightLeft, Bot, Brain, Circle, CircleCheck, CircleX, ListChecks, LoaderCircle, MinusCircle, ShieldAlert, Users, Wrench } from "lucide-react";
+import { ArrowRightLeft, Bot, Brain, Check, Circle, CircleCheck, CircleHelp, CircleX, ListChecks, LoaderCircle, MinusCircle, Send, ShieldAlert, User, Users, Wrench } from "lucide-react";
 import { Link } from "react-router";
 import { useState, type ReactNode } from "react";
 import { Badge, StatusBadge } from "@/components/ui/badge";
@@ -18,6 +18,7 @@ type Item =
   | { kind: "event"; ev: Ev }
   | { kind: "tool"; call: Ev; result?: Ev }
   | { kind: "approval"; req: Ev; resolved?: Ev }
+  | { kind: "question"; q: Ev; answered?: Ev }
   | { kind: "delegate"; start: Ev; end?: Ev; items: Item[]; plan?: Ev };
 
 /** The newest plan.update checklist among a run's own events. */
@@ -46,11 +47,20 @@ function groupItems(events: Ev[], byRun: Map<string, Ev[]>): Item[] {
   const delegates = new Map<string, Extract<Item, { kind: "delegate" }>>();
   const openTools: Array<Extract<Item, { kind: "tool" }>> = [];
   const approvals = new Map<string, Extract<Item, { kind: "approval" }>>();
+  const questions = new Map<string, Extract<Item, { kind: "question" }>>();
   for (const ev of events) {
-    if (ev.type === "tool_call") {
+    if (ev.type === "question") {
+      const it = { kind: "question" as const, q: ev };
+      questions.set(`${ev._runId}:${ev.id}`, it);
+      items.push(it);
+    } else if (ev.type === "question_answered") {
+      const it = questions.get(`${ev._runId}:${ev.id}`);
+      if (it) it.answered = ev;
+    } else if (ev.type === "tool_call") {
       const it = { kind: "tool" as const, call: ev };
       openTools.push(it);
-      items.push(it);
+      // ask_user shows as its question card instead.
+      if (ev.name !== "ask_user") items.push(it);
     } else if (ev.type === "tool_result") {
       const it = openTools.shift();
       if (it) it.result = ev;
@@ -132,6 +142,78 @@ function ToolItem({ call, result }: { call: Ev; result?: Ev }) {
   );
 }
 
+/** An agent's question. Its text is model output: shown as plain text, labelled, never linkified. */
+function QuestionItem({ q, answered }: { q: Ev; answered?: Ev }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const send = async (answer: string) => {
+    if (!answer.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api("POST", `/api/runs/${q._runId}/questions/${q.id}`, { answer });
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  };
+  const choices: string[] = Array.isArray(q.choices) ? q.choices : [];
+  return (
+    <div className={cn("rounded-lg border-2 px-4 py-3", answered ? "border-border bg-card" : "border-primary bg-accent/50")}>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <CircleHelp className="size-4 text-primary" />
+        <b>{q.agent} asks</b>
+        <span className="text-xs text-muted-foreground">written by the AI · never share passwords or keys</span>
+      </div>
+      <p className="mt-1.5 whitespace-pre-wrap">{q.question}</p>
+      {answered ? (
+        <p className="mt-2 flex items-center gap-1.5 text-sm">
+          {answered.answer === null ? (
+            <span className="text-muted-foreground">No answer ({answered.by}); the agent carried on.</span>
+          ) : (
+            <>
+              <User className="size-3.5 text-muted-foreground" /> <b>You:</b> <span className="whitespace-pre-wrap">{answered.answer}</span>
+            </>
+          )}
+        </p>
+      ) : (
+        <div className="mt-2.5 flex flex-col gap-2">
+          {choices.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {choices.map((c) => (
+                <Button key={c} variant="outline" size="sm" disabled={busy} onClick={() => void send(c)}>
+                  {c}
+                </Button>
+              ))}
+            </div>
+          )}
+          <form
+            className="flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void send(text);
+            }}
+          >
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={choices.length ? "…or type your own answer" : "Your answer"}
+              className="h-8 flex-1 rounded-md border bg-background px-2.5 text-sm"
+              disabled={busy}
+              aria-label="Your answer"
+            />
+            <Button size="sm" type="submit" disabled={busy || !text.trim()}>
+              <Send /> Answer
+            </Button>
+          </form>
+          {error && <span className="text-xs text-bad">{error}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ApprovalItem({ req, resolved }: { req: Ev; resolved?: Ev }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,6 +272,21 @@ function EventItem({ ev }: { ev: RunEvent }) {
           Using <b>{ev.label}</b> · <code className="font-mono text-xs">{ev.model}</code>
           {ev.attempt > 1 ? ` (attempt ${ev.attempt})` : ""}
         </Row>
+      );
+    case "user_message":
+      return (
+        <div className="flex justify-end">
+          <div className="max-w-[80%] rounded-lg rounded-br-sm bg-primary px-3.5 py-2 text-sm text-primary-foreground">
+            <span className="mr-1.5 text-xs opacity-80">{ev.followUpOf ? "You (follow-up)" : "You"}</span>
+            <span className="whitespace-pre-wrap">{ev.text}</span>
+          </div>
+        </div>
+      );
+    case "user_message_delivered":
+      return (
+        <div className="flex items-center justify-end gap-1 px-1 text-xs text-muted-foreground">
+          <Check className="size-3.5" /> the agent read your message{ev.count > 1 ? "s" : ""}
+        </div>
       );
     case "start":
       return (
@@ -329,6 +426,8 @@ function Items({ items }: { items: Item[] }) {
           <ToolItem key={it.call._key} call={it.call} result={it.result} />
         ) : it.kind === "approval" ? (
           <ApprovalItem key={it.req._key} req={it.req} resolved={it.resolved} />
+        ) : it.kind === "question" ? (
+          <QuestionItem key={it.q._key} q={it.q} answered={it.answered} />
         ) : it.kind === "delegate" ? (
           <DelegateItem key={it.start._key} start={it.start} end={it.end} items={it.items} plan={it.plan} />
         ) : (

@@ -5,8 +5,8 @@ import { useId, type ReactNode, type Ref } from "react";
 import type { AvatarLook } from "../../../src/agent/schema.ts";
 import { cn } from "@/lib/utils";
 
-export type Mood = "idle" | "thinking" | "working" | "talking" | "waiting" | "worried" | "sad" | "happy" | "frustrated" | "waving";
-export const MOOD_LIST: Mood[] = ["idle", "thinking", "working", "talking", "waiting", "worried", "sad", "frustrated", "happy", "waving"];
+export type Mood = "idle" | "thinking" | "working" | "talking" | "waiting" | "worried" | "asking" | "sad" | "happy" | "frustrated" | "waving";
+export const MOOD_LIST: Mood[] = ["idle", "thinking", "working", "talking", "waiting", "worried", "asking", "sad", "frustrated", "happy", "waving"];
 
 export const SKIN: Record<AvatarLook["skin"], { base: string; shade: string }> = {
   porcelain: { base: "#fde3d0", shade: "#efc3a4" },
@@ -226,6 +226,7 @@ function arms(mood: Mood): { left: ArmPose; right: ArmPose } {
     case "waving":
       return { left, right: { d: "M87 96 Q100 84 101 67", hand: [101, 62], className: "av-wave" } };
     case "worried":
+    case "asking":
       return { left, right: { d: "M87 96 Q99 88 97 75", hand: [97, 70], className: "av-raise" } };
     case "thinking":
       return { left, right: { d: "M87 96 Q94 106 74 86", hand: [71, 82] } };
@@ -446,7 +447,7 @@ function Headgear({ look }: { look: AvatarLook }) {
   }
 }
 
-function Eyes({ mood }: { mood: Mood }) {
+function Eyes({ mood, gaze = 0 }: { mood: Mood; gaze?: number }) {
   if (mood === "happy" || mood === "waving") {
     return (
       <g stroke={INK} strokeWidth="3" fill="none" strokeLinecap="round">
@@ -461,10 +462,13 @@ function Eyes({ mood }: { mood: Mood }) {
     working: [0, 2, 5],
     waiting: [-2.4, 0, 6.4],
     worried: [0, 0, 7.6],
+    asking: [1.2, -1.4, 7.4],
     sad: [0, 2, 5.8],
     frustrated: [0, 0.6, 3.8],
   };
-  const [dx, dy, ry] = shape[mood] ?? [0, 0, 6.6];
+  const [mdx, dy, ry] = shape[mood] ?? [0, 0, 6.6];
+  // gaze (-1 … 1) turns the eyes toward the cursor.
+  const dx = Math.max(-2.6, Math.min(2.6, mdx + gaze * 2.4));
   const eye = (cx: number) => {
     const r = Math.min(4.2, ry - 0.6);
     return (
@@ -486,6 +490,7 @@ function Brows({ mood, color }: { mood: Mood; color: string }) {
     happy: [52, 50, 50, 52],
     waving: [52, 50, 50, 52],
     worried: [55, 48, 48, 55],
+    asking: [49, 49, 52, 53],
     sad: [54, 49, 49, 54],
     frustrated: [49, 56, 56, 49],
     thinking: [51, 50, 54, 54],
@@ -518,6 +523,8 @@ function Mouth({ mood }: { mood: Mood }) {
       return <path d="M58 86 Q64 83 68 86" stroke={INK} strokeWidth="2.4" fill="none" strokeLinecap="round" />;
     case "worried":
       return <path d="M49 88 Q53 83 57 88 Q61 92 65 88 Q68 84 71 87" stroke={INK} strokeWidth="2.4" fill="none" strokeLinecap="round" />;
+    case "asking":
+      return <ellipse cx="62" cy="86" rx="3.4" ry="3.8" fill={dark} stroke={INK} strokeWidth="1.4" />;
     case "sad":
       return <path d="M51 90 Q60 81 69 90" stroke={INK} strokeWidth="2.6" fill="none" strokeLinecap="round" />;
     case "frustrated":
@@ -552,6 +559,15 @@ function Extras({ mood, accent }: { mood: Mood; accent: string }) {
       </g>,
     );
   }
+  if (mood === "asking") {
+    parts.push(
+      <g key="ask" className="av-ask">
+        <circle cx="104" cy="22" r="11" fill={accent} stroke={INK} strokeWidth="2" />
+        <path d="M100 18 Q100 13 104.5 13 Q109 13 109 17.5 Q109 20.5 105 22 L105 25" stroke={INK} strokeWidth="2.6" fill="none" strokeLinecap="round" />
+        <circle cx="105" cy="29.5" r="1.7" fill={INK} />
+      </g>,
+    );
+  }
   if (mood === "worried") parts.push(<path key="sweat" className="av-drip" d="M92 40 Q87 50 92 54 Q97 50 92 40 Z" fill="#7dd3fc" stroke={INK} strokeWidth="1.2" />);
   if (mood === "sad") parts.push(<path key="tear" className="av-drip" d="M76 71 Q72 79 76 81 Q80 79 76 71 Z" fill="#7dd3fc" stroke={INK} strokeWidth="1" />);
   if (mood === "thinking") {
@@ -579,7 +595,7 @@ function Extras({ mood, accent }: { mood: Mood; accent: string }) {
   return <>{parts}</>;
 }
 
-function Head({ look, mood }: { look: AvatarLook; mood: Mood }) {
+function Head({ look, mood, gaze }: { look: AvatarLook; mood: Mood; gaze?: number }) {
   const skin = SKIN[look.skin];
   const hooded = look.accessory === "hood" || look.accessory === "helmet";
   return (
@@ -592,7 +608,7 @@ function Head({ look, mood }: { look: AvatarLook; mood: Mood }) {
       {!hooded && <HairFront look={look} />}
       {hooded && look.hair !== "bald" && look.hair !== "buzz" && <path d="M36 50 Q48 40 60 46 Q72 40 84 50 Q72 46 60 52 Q48 46 36 50 Z" fill={look.hairColor} />}
       <Brows mood={mood} color={look.hairColor} />
-      <Eyes mood={mood} />
+      <Eyes mood={mood} gaze={gaze} />
       <path d="M60 69 Q57 76 62 77" stroke={skin.shade} strokeWidth="2.2" fill="none" strokeLinecap="round" />
       <Mouth mood={mood} />
       <Headgear look={look} />
@@ -609,9 +625,12 @@ export function Avatar({
   className,
   title,
   svgRef,
+  gaze,
 }: {
   look: AvatarLook;
   mood?: Mood;
+  /** -1 (looking left) … 1 (looking right): the eyes follow the cursor on the desktop. */
+  gaze?: number;
   /** Width in px. */
   size?: number;
   /** "head": a square portrait for small spots (lists, cards). */
@@ -659,7 +678,7 @@ export function Avatar({
         {mood === "working" && <Holo look={look} />}
         <Arm pose={pose.right} k={k} look={look} />
         <Pauldrons look={look} />
-        <Head look={look} mood={mood} />
+        <Head look={look} mood={mood} gaze={gaze} />
       </g>
     </svg>
   );

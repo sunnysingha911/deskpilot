@@ -358,3 +358,114 @@ html.overlay body {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ── Overlay interactions: hover card, action bubble, reactions ─────────── */
+.ov-card,
+.ov-menu {
+  position: absolute;
+  /* Above the head (figure 170px + name tag), never over the face; the window is tall enough. */
+  bottom: 198px;
+  overflow-wrap: anywhere;
+  z-index: 5;
+  width: 236px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: rgb(17 24 39 / 0.94);
+  color: #f9fafb;
+  font: 12px/1.35 -apple-system, BlinkMacSystemFont, sans-serif;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.35);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.ov-menu-left { left: 0; }
+.ov-menu-right { right: 0; }
+.ov-card b,
+.ov-menu-head b { font-size: 12.5px; }
+.ov-card-task { margin-top: 3px; color: #e5e7eb; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.ov-card-meta { margin-top: 4px; color: #9ca3af; font-size: 11px; }
+.ov-card-hint { margin-top: 4px; color: #6b7280; font-size: 10.5px; }
+.ov-menu { cursor: default; max-height: 400px; overflow: auto; }
+.ov-menu-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 6px; }
+.ov-menu-head span { color: #9ca3af; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-section { margin-bottom: 7px; padding-bottom: 7px; border-bottom: 1px solid rgb(255 255 255 / 0.1); }
+.ov-note { color: #e5e7eb; margin-bottom: 6px; }
+.ov-note code { font: 11px ui-monospace, Menlo, monospace; color: #fde68a; }
+.ov-label { color: #a5b4fc; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+.ov-question { margin: 3px 0 6px; white-space: pre-wrap; color: #f3f4f6; }
+.ov-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+.ov-choices { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.ov-prio { align-items: center; color: #9ca3af; font-size: 11px; }
+.ov-btn {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: 7px;
+  padding: 4px 9px;
+  background: rgb(255 255 255 / 0.08);
+  color: #f9fafb;
+  font: 600 11.5px -apple-system, BlinkMacSystemFont, sans-serif;
+  cursor: pointer;
+}
+.ov-btn:hover { background: rgb(255 255 255 / 0.16); }
+.ov-btn:disabled { opacity: 0.45; cursor: default; }
+.ov-small { padding: 2px 7px; font-size: 10.5px; text-transform: capitalize; }
+.ov-primary { background: #4f6df5; border-color: #4f6df5; }
+.ov-primary:hover { background: #3f5de5; }
+.ov-danger { border-color: rgb(248 113 113 / 0.6); color: #fecaca; }
+.ov-approve { min-width: 128px; border-color: #34d399; color: #d1fae5; }
+.ov-hold-fill { position: absolute; inset: 0 auto 0 0; background: rgb(52 211 153 / 0.45); }
+.ov-btn-label { position: relative; }
+.ov-error { margin-top: 5px; color: #fca5a5; font-size: 11px; }
+.ov-reply textarea {
+  width: 100%;
+  resize: none;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgb(0 0 0 / 0.35);
+  color: #f9fafb;
+  font: 12px/1.35 -apple-system, BlinkMacSystemFont, sans-serif;
+  outline: none;
+}
+.ov-reply textarea:focus { border-color: #818cf8; }
+.ov-reply .ov-row { justify-content: flex-end; }
+/* Something is waiting on you: a soft pulsing ring under the figure. */
+.ov-waiting .ov-figure::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  width: 92px;
+  height: 14px;
+  margin-left: -46px;
+  border-radius: 50%;
+  box-shadow: 0 0 14px 4px rgb(129 140 248 / 0.75);
+  animation: ov-pulse 1.2s ease-in-out infinite;
+  z-index: 0;
+}
+.ov-asking .ov-bubble { background: #eef2ff; color: #3730a3; animation: ov-pulse 1.3s ease-in-out infinite; }
+.ov-asking .ov-bubble::after { background: #eef2ff; }
+.av-ask { transform-origin: 50% 100%; animation: av-raise 1.1s ease-in-out infinite; }
+/* Reactions */
+.ov-react-poke .ov-figure .av { animation: ov-poke 0.55s ease-out; }
+.ov-react-cheer .ov-figure .av { animation: ov-cheer 0.9s ease-out; }
+.ov-react-nod .ov-figure .av { animation: ov-nod 0.7s ease-in-out; }
+@keyframes ov-poke {
+  0% { transform: translateY(0) scale(1, 1); }
+  25% { transform: translateY(-12px) scale(0.96, 1.05); }
+  55% { transform: translateY(0) scale(1.05, 0.94); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
+@keyframes ov-cheer {
+  0%, 100% { transform: translateY(0) rotate(0); }
+  20% { transform: translateY(-16px) rotate(-6deg); }
+  45% { transform: translateY(0) rotate(0); }
+  65% { transform: translateY(-9px) rotate(6deg); }
+}
+@keyframes ov-nod {
+  0%, 100% { transform: rotate(0); }
+  30% { transform: rotate(4deg) translateY(2px); }
+  60% { transform: rotate(-2deg); }
+}
+.ov-slot:has(.ov-menu) .ov-bubble,
+.ov-slot:has(.ov-card) .ov-bubble { visibility: hidden; }

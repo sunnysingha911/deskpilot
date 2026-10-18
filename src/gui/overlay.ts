@@ -31,7 +31,7 @@ export function startOverlay(panelUrl: string, onOpenRun: (runId: string) => voi
   }
   const origin = new URL(panelUrl).origin;
   const child: ChildProcess = spawn(OVERLAY_PATH, [], { stdio: ["pipe", "pipe", "inherit"] });
-  child.stdin!.write(JSON.stringify({ url: `${panelUrl}#/overlay`, origin, width: 640, height: 400, ...pos }) + "\n");
+  child.stdin!.write(JSON.stringify({ url: `${panelUrl}#/overlay`, origin, width: 640, height: 640, ...pos }) + "\n");
 
   createInterface({ input: child.stdout! }).on("line", (line) => {
     let msg: { event?: string; runId?: unknown; x?: unknown; y?: unknown };

@@ -5,9 +5,11 @@
 // (the parent exited) quits the overlay. Events go to stdout as JSON lines:
 //   {"event":"ready"} · {"event":"open","runId":"…"} · {"event":"moved","x":…,"y":…}
 //
-// The window never becomes key or main and never activates the app, so the frontmost app stays
-// frontmost (input.* tools depend on that). Mouse events pass through except over avatar rectangles
-// the page reports. Web data is kept in memory only (nothing written to ~/Library).
+// The window never becomes main and never activates the app, so the frontmost app stays frontmost
+// (input.* tools depend on that). It becomes key only while the user types into an avatar's reply
+// box ("focus" … "blur"; the core holds the desktop meanwhile so no agent types), then hands the
+// keyboard back to the app that had it. Mouse events pass through except over avatar rectangles the
+// page reports. Web data is kept in memory only (nothing written to ~/Library).
 import AppKit
 import WebKit
 
@@ -26,7 +28,9 @@ func emit(_ obj: [String: Any]) {
 }
 
 final class OverlayPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
+    /** True only while the user types into a reply box. */
+    var allowKey = false
+    override var canBecomeKey: Bool { allowKey }
     override var canBecomeMain: Bool { false }
 }
 
@@ -42,6 +46,8 @@ final class Controller: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     /// Hit areas in web-view coordinates (top-left origin, CSS px = points).
     var rects: [CGRect] = []
     var dragging = false
+    /** App that had the keyboard before a reply box took it. */
+    var previousApp: NSRunningApplication?
 
     init(config: Config) {
         origin = config.origin
@@ -86,7 +92,7 @@ final class Controller: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 
     func updateMouse() {
-        if dragging { panel.ignoresMouseEvents = false; return }
+        if dragging || panel.allowKey { panel.ignoresMouseEvents = false; return }
         let p = NSEvent.mouseLocation
         let f = panel.frame
         let local = CGPoint(x: p.x - f.minX, y: f.height - (p.y - f.minY))
@@ -111,6 +117,18 @@ final class Controller: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "dragEnd":
             dragging = false
             emit(["event": "moved", "x": panel.frame.minX, "y": panel.frame.minY])
+        case "focus":
+            // The page asks right before showing a reply box (the core already holds the desktop).
+            previousApp = NSWorkspace.shared.frontmostApplication
+            panel.allowKey = true
+            panel.ignoresMouseEvents = false
+            panel.makeKey()
+            panel.makeFirstResponder(web)
+        case "blur":
+            panel.allowKey = false
+            panel.resignKey()
+            if let app = previousApp, !app.isTerminated { app.activate() }
+            previousApp = nil
         case "open":
             if let runId = body["runId"] as? String, runId.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil {
                 emit(["event": "open", "runId": runId])

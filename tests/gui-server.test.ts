@@ -12,6 +12,7 @@ import { startGuiServer, type GuiServer } from "../src/gui/server.ts";
 
 const tmp = mkdtempSync(join(ensureDir(SCRATCH_DIR), "gui-test-"));
 process.env.DESKPILOT_UPLOADS_DIR = join(tmp, "uploads");
+process.env.DESKPILOT_DESKTOP_LOCK = join(tmp, "desktop.lock");
 const logger = new ActionLogger(join(tmp, "actions.db"));
 const SETTINGS = join(DATA_DIR, "settings.json");
 const settingsBackup = existsSync(SETTINGS) ? readFileSync(SETTINGS, "utf8") : null;
@@ -449,5 +450,101 @@ describe("several tasks at once", () => {
       mockHandler = undefined;
       delete process.env.XAI_API_KEY;
     }
+  });
+});
+
+describe("talking with agents through the GUI", () => {
+  const userTexts = (b: any) => (b.messages ?? []).filter((m: any) => m.role === "user").map((m: any) => (typeof m.content === "string" ? m.content : ""));
+  const toolCall = (id: string, name: string, args: object) => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }] });
+  const reply = (content: string) => ({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }] });
+
+  test("ask_user → answer from the GUI; a message mid-run reaches the model; a follow-up keeps the conversation", async () => {
+    mockHandler = (b) => {
+      const texts = userTexts(b).join(" | ");
+      if (!texts.includes("TALK")) return undefined;
+      if (texts.includes("FOLLOWUP")) return reply("follow-up answer");
+      const tools = (b.messages ?? []).filter((m: any) => m.role === "tool");
+      if (!tools.length) return toolCall("q1", "ask_user", { question: "Blue or green?", choices: ["blue", "green"] });
+      if (tools.length === 1) return toolCall("s1", "shell__run", { command: "echo hi" });
+      return reply(`done; heard: ${texts.includes("make it bold") ? "bold" : "nothing"}`);
+    };
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
+    try {
+      const start = await call("POST", "/api/runs", { agent: AGENT, task: "TALK pick a colour" });
+      const { runId } = start.body;
+      let asked: any = null;
+      const events = await readEvents(runId, (t) => t.includes("closed"), async (type, data) => {
+        if (type === "question") {
+          asked = data;
+          const meta = (await call("GET", "/api/meta")).body.activeRuns.find((r: any) => r.runId === runId);
+          assert.equal(meta.pendingQuestions, 1);
+          assert.equal((await call("GET", `/api/runs/${runId}`)).body.pendingQuestions[0].question, "Blue or green?");
+          // A message sent now is delivered with the next tool results.
+          assert.equal((await call("POST", `/api/runs/${runId}/messages`, { text: "make it bold" })).body.queued, true);
+          assert.equal((await call("POST", `/api/runs/${runId}/questions/${data.id}`, { answer: "" })).status, 400);
+          assert.equal((await call("POST", `/api/runs/${runId}/questions/${data.id}`, { answer: "green" })).status, 200);
+        }
+      });
+      assert.deepEqual(asked.choices, ["blue", "green"]);
+      const types = events.map((e) => e.type);
+      for (const t of ["question", "question_answered", "user_message", "user_message_delivered"]) assert.ok(types.includes(t), `missing ${t}`);
+      assert.equal(events.find((e) => e.type === "end")!.data.summary.finalText, "done; heard: bold");
+
+      // Follow-up on the finished run: same agent, earlier messages included, linked as "followup".
+      mockRequests.length = 0;
+      const fu = await call("POST", `/api/runs/${runId}/messages`, { text: "FOLLOWUP and now?" });
+      assert.ok(fu.body.followUpRunId, JSON.stringify(fu.body));
+      const fuEvents = await readEvents(fu.body.followUpRunId, (t) => t.includes("closed"));
+      assert.equal(fuEvents.find((e) => e.type === "end")!.data.summary.finalText, "follow-up answer");
+      const sent = mockRequests.at(-1).messages.map((m: any) => m.role);
+      assert.ok(sent.filter((r: string) => r === "tool").length >= 2, "earlier tool results are part of the conversation");
+      assert.equal(mockRequests.at(-1).messages.at(-1).content, "FOLLOWUP and now?");
+      const detail = await call("GET", `/api/runs/${fu.body.followUpRunId}`);
+      assert.deepEqual([detail.body.run.parent_run_id, detail.body.run.relation], [runId, "followup"]);
+    } finally {
+      mockHandler = undefined;
+      delete process.env.XAI_API_KEY;
+    }
+  });
+
+  test("approving from a desktop avatar needs a held press and a desktop no agent is driving", async () => {
+    mockHandler = (b) => (userTexts(b).join(" ").includes("OVERLAY") ? ((b.messages ?? []).some((m: any) => m.role === "tool") ? reply("ok") : toolCall("o1", "shell__run", { command: `rm -f ${MARKER}` })) : undefined);
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
+    try {
+      const { runId } = (await call("POST", "/api/runs", { agent: AGENT, task: "OVERLAY delete it" })).body;
+      let id = "";
+      const done = readEvents(runId, (t) => t.includes("closed"), async (type, data) => {
+        if (type === "approval_request") id = data.id;
+      });
+      while (!id) await new Promise((r) => setTimeout(r, 20));
+      assert.equal((await call("POST", `/api/runs/${runId}/approvals/${id}`, { approved: true, via: "overlay", heldMs: 50 })).status, 400, "a quick click isn't enough");
+      // An agent is clicking right now: refused even with a held press.
+      const { desktopLock } = await import("../src/core/desktop-lock.ts");
+      let release!: () => void;
+      const busy = desktopLock().run(undefined, () => new Promise<void>((r) => (release = r)));
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal((await call("POST", `/api/runs/${runId}/approvals/${id}`, { approved: true, via: "overlay", heldMs: 1000 })).status, 409);
+      release();
+      await busy;
+      // Denying from the overlay is always allowed (it can only make things safer).
+      assert.equal((await call("POST", `/api/runs/${runId}/approvals/${id}`, { approved: false, via: "overlay" })).status, 200);
+      await done;
+      assert.equal(readFileSync(MARKER, "utf8"), "must survive");
+    } finally {
+      mockHandler = undefined;
+      delete process.env.XAI_API_KEY;
+    }
+  });
+
+  test("typing into an avatar's reply box holds the desktop until it's closed", async () => {
+    const { desktopLock } = await import("../src/core/desktop-lock.ts");
+    assert.equal((await call("POST", "/api/overlay/typing", { on: true })).body.holding, true);
+    let ran = false;
+    const action = desktopLock().run({ id: "agent-task", mode: "optimized", priority: () => "high" }, async () => void (ran = true));
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(ran, false, "the agent's click waits while the user types");
+    assert.equal((await call("POST", "/api/overlay/typing", { on: false })).body.holding, false);
+    await action;
+    assert.equal(ran, true);
   });
 });

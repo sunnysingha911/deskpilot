@@ -109,6 +109,20 @@ data/            SQLite DBs (gitignored)
   effort → `think` (low = off). Only tool-capable models are offered. `/api/ps` reports
   context_length 4096 under the MLX runner even when the larger num_ctx is honored (verified).
 
+## Interaction invariants
+- `Interaction` (src/agent/interaction.ts): the user's messages to a running task are queued and delivered
+  with the next tool results (`TurnInput.tool_results.note`) or, if it just finished, as a new user turn;
+  only the top-level run takes messages. `ask_user` (per run, read-only, answer is the user's words)
+  waits for an answer (timeout → null + "carry on"); called agents may ask too. Waits are excluded from
+  time budgets via `ToolContext.addWait`. Agents are told not to use ask_user to ask for permission.
+- `POST /api/runs/:id/messages`: running → queued; finished → follow-up run (relation "followup") that
+  resumes the native transcript (`startSession(opts, history)`) when the earlier run completed on the
+  same provider kind, else passes its answer as data. `POST /api/runs/:id/questions/:qid` answers.
+- Agent questions are model output: the UI labels them "written by the AI", plain text only; speech
+  bubbles show our own wording ("has a question for you"), presence carries ids, never question text.
+- Approving from the overlay (`via: "overlay"`) needs `heldMs ≥ 800` and no desktop action in the last
+  1.5s (`DesktopLock.quietFor`), so an agent's own click can't approve; denying is always allowed.
+
 ## Parallel task invariants
 - A task = a top-level run + its delegations/fallbacks; `TaskInfo {id, mode, priority()}` (src/core/task.ts)
   flows through RunDeps → ToolContext. Mode: `optimized` (default) | `parallel`; priority high|normal|low,
@@ -161,7 +175,9 @@ data/            SQLite DBs (gitignored)
   `ui/src/components/Avatar.tsx` and used by both the control panel and the overlay.
 - `src/gui/presence.ts` maps run events to mood + status. Status lines are our own words (tool/agent
   names, capped at 40 chars), never model output. Feed: `/api/presence` (SSE, token required).
-- The overlay never becomes key/main and never activates (input.* needs the target app frontmost);
+- The overlay never becomes main and never activates (input.* needs the target app frontmost). It becomes
+  key only while the user types in an avatar's reply box: the page first takes the desktop lock as the
+  user (`POST /api/overlay/typing`, top rank, auto-released after 90s idle), then "focus"/"blur" the host;
   mouse passes through except over avatar rects the page reports; it steps aside (`hideForInput`)
   while input.* tools run. Only our origin may load in it; web data is non-persistent (nothing in
   ~/Library). Token reaches it over stdin, not argv. Position is saved in data/overlay.json.

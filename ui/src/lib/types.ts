@@ -23,6 +23,7 @@ export interface ActiveRun {
   mode: RunMode;
   priority: Priority;
   pendingApprovals: number;
+  pendingQuestions: number;
 }
 export interface Meta {
   os: string;
@@ -100,6 +101,7 @@ export interface AttachedFile {
 export interface RunDetail {
   run: RunRow;
   attachments: AttachedFile[];
+  pendingQuestions?: Array<{ id: string; agent: string; question: string; choices?: string[] }>;
   children: ChildRun[];
   active: boolean;
   actions: ActionRow[];
@@ -123,6 +125,13 @@ export interface PresenceAvatar {
   status: string;
   depth: number;
   leaving: boolean;
+  /** What it's waiting on you for (ids only; question text is fetched from the run). */
+  pending?: { kind: "approval"; id: string; tool: string } | { kind: "question"; id: string; choices: number };
+  /** The user's own task text (top-level agents only). */
+  task?: string;
+  startedAt: number;
+  steps: number;
+  outputTokens: number;
 }
 export interface PresenceState {
   avatars: PresenceAvatar[];

@@ -5,7 +5,9 @@
 // Irreversible (and alwaysAsk) tool calls prompt y/N in the terminal; non-interactive runs deny them.
 // "@other-agent" in the task lets the agent hand sub-tasks to that agent (as does canDelegateTo).
 import { join } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../src/agent/definition.ts";
+import type { Interaction } from "../src/agent/interaction.ts";
 import { newRunId, runAgent, type RunEvent } from "../src/agent/runner.ts";
 import { cliApprover } from "../src/core/approval.ts";
 import { addFromPath, createSet, formatSize, listSet, type AttachmentSet } from "../src/core/attachments.ts";
@@ -121,11 +123,30 @@ if (files.length) {
 }
 
 if (userAllowed.length) console.log(dim(`may call: ${userAllowed.join(", ")} (mentioned in the task)`));
+// Agents can ask you questions in the terminal (messages mid-run are a control-panel feature).
+const interaction: Interaction = {
+  takeMessages: () => [],
+  async ask(q) {
+    if (!process.stdin.isTTY) return { answer: null, by: "policy:non-interactive" };
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      const choices = q.choices?.length ? `\n${q.choices.map((c, i) => `  ${i + 1}. ${c}`).join("\n")}` : "";
+      const a = (await rl.question(`\n❓ ${q.agent} asks (written by the AI): ${q.question}${choices}\nYour answer${choices ? " (number or text)" : ""}: `)).trim();
+      if (!a) return { answer: null, by: "user:skipped" };
+      const n = Number(a);
+      return { answer: q.choices && Number.isInteger(n) && n >= 1 && n <= q.choices.length ? q.choices[n - 1]! : a, by: "user:prompt" };
+    } finally {
+      rl.close();
+    }
+  },
+};
+
 const runId = newRunId();
 const taskInfo: TaskInfo = { id: runId, mode, priority: () => priority };
 const result = await runAgent(def, task, {
   runId,
   task: taskInfo,
+  interaction,
   provider: providerFor(def),
   executor,
   logger,

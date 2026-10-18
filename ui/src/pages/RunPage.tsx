@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { parseMentions } from "../../../src/agent/schema.ts";
 import { AttachmentPicker, NO_ATTACHMENTS, type AttachmentState } from "@/components/Attachments";
+import { ChatBox } from "@/components/ChatBox";
 import { PageHeader, useMeta } from "@/components/Layout";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
@@ -34,6 +35,8 @@ export function RunPage() {
   const [model, setModel] = useState("");
   const [task, setTask] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
+  /** Agent of the watched run, remembered so the chat box can name it after the run finishes. */
+  const [watchAgent, setWatchAgent] = useState<string | undefined>(undefined);
   const [withAgents, setWithAgents] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<AttachmentState>(NO_ATTACHMENTS);
   const [mode, setMode] = useState<RunMode>(() => (localStorage.getItem("deskpilot-run-mode") as RunMode | null) ?? "optimized");
@@ -45,7 +48,10 @@ export function RunPage() {
 
   // Watch a run that is already in progress (e.g. after reopening the window).
   useEffect(() => {
-    if (!runId && meta.data?.activeRunId) setRunId(meta.data.activeRunId);
+    if (!runId && meta.data?.activeRunId) {
+      setRunId(meta.data.activeRunId);
+      setWatchAgent(meta.data.activeRuns?.find((r) => r.runId === meta.data!.activeRunId)?.agent);
+    }
   }, [meta.data?.activeRunId, runId]);
   const activeRuns = meta.data?.activeRuns ?? [];
 
@@ -69,6 +75,7 @@ export function RunPage() {
     onSuccess: ({ runId }) => {
       localStorage.setItem("deskpilot-last-agent", selected!.name);
       setRunId(runId);
+      setWatchAgent(selected!.name);
       // The form is ready for the next task straight away (the files now belong to that run).
       clearForm();
       toast(`Started ${selected!.name}. You can start another task now: it runs alongside.`);
@@ -250,7 +257,10 @@ export function RunPage() {
       <RunningNow
         runs={activeRuns}
         watching={stream.currentRunId ?? runId}
-        onWatch={setRunId}
+        onWatch={(id) => {
+          setRunId(id);
+          setWatchAgent(activeRuns.find((r) => r.runId === id)?.agent);
+        }}
         onStop={(id) => stop.mutate(id)}
         onPriority={(id, p) => changePriority.mutate({ runId: id, priority: p })}
       />
@@ -263,6 +273,15 @@ export function RunPage() {
             </Link>
           </div>
           <Timeline events={stream.events} />
+          <ChatBox
+            runId={stream.currentRunId ?? runId}
+            agent={watchAgent ?? activeRuns.find((r) => r.runId === (stream.currentRunId ?? runId))?.agent}
+            running={!stream.done}
+            onFollowUp={(id) => {
+              setRunId(id);
+              qc.invalidateQueries({ queryKey: ["meta"] });
+            }}
+          />
         </div>
       )}
     </>
@@ -320,6 +339,7 @@ function RunningNow({
               <span className="truncate text-xs text-muted-foreground">{r.task}</span>
             </button>
             {r.pendingApprovals > 0 && <Badge tone="warn">needs your OK</Badge>}
+            {r.pendingQuestions > 0 && <Badge tone="info">needs your answer</Badge>}
             <Badge>{r.mode}</Badge>
             <NativeSelect
               value={r.priority}

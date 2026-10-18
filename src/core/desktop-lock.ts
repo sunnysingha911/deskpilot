@@ -18,7 +18,9 @@ import type { Priority, TaskInfo } from "./task.ts";
 export const LEASE_MS = 5000;
 export const MAX_STRETCH_MS = 30_000;
 const RANK: Record<Priority, number> = { high: 2, normal: 1, low: 0 };
-const rankOf = (t: TaskInfo | undefined) => (t && t.mode === "optimized" ? RANK[t.priority()] : RANK.normal);
+/** The person at the computer (typing into an avatar's reply box) goes before any agent. */
+export const USER_TASK_ID = "user";
+const rankOf = (t: TaskInfo | undefined) => (t?.id === USER_TASK_ID ? 3 : t && t.mode === "optimized" ? RANK[t.priority()] : RANK.normal);
 
 /** Cross-process mutex: a file created exclusively, holding our pid. A dead holder's file is taken over. */
 export class FileLock {
@@ -86,6 +88,7 @@ export class DesktopLock {
   private seq = 0;
   private lease: { taskId: string; rank: number; until: number; stretchStart: number } | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private lastEnded = 0;
 
   private leaseMs: number;
   private maxStretchMs: number;
@@ -115,9 +118,15 @@ export class DesktopLock {
       }
     } finally {
       this.busy = false;
+      this.lastEnded = Date.now();
       this.afterAction(task);
       this.pump();
     }
+  }
+
+  /** Milliseconds since a desktop action in this process last ran (0 while one is running). */
+  quietFor(): number {
+    return this.busy ? 0 : this.lastEnded ? Date.now() - this.lastEnded : Number.POSITIVE_INFINITY;
   }
 
   private afterAction(task: TaskInfo | undefined): void {
