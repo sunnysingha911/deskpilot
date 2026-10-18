@@ -55,10 +55,11 @@ const call = async (method: string, path: string, body?: unknown, token = gui.to
   return { status: res.status, body: (await res.json().catch(() => null)) as any, headers: res.headers };
 };
 
-function rawStatus(headers: Record<string, string>): Promise<number> {
+function rawStatus(headers: Record<string, string>, path = "/api/meta"): Promise<number> {
   const u = new URL(base);
   return new Promise((resolve, reject) => {
-    const req = request({ host: u.hostname, port: u.port, path: "/api/meta", headers: { "x-deskpilot-token": gui.token, ...headers } }, (res) => {
+    // Raw request: the path is sent exactly as written (fetch would normalize "..").
+    const req = request({ host: u.hostname, port: u.port, path, headers: { "x-deskpilot-token": gui.token, ...headers } }, (res) => {
       res.resume();
       resolve(res.statusCode ?? 0);
     });
@@ -115,12 +116,15 @@ describe("security", () => {
   });
   test("page is served with a strict CSP", async () => {
     const res = await fetch(base + "/");
-    assert.equal(res.status, 200);
+    assert.ok(res.status === 200 || res.status === 503, "200, or 503 if the UI isn't built");
     assert.match(res.headers.get("content-security-policy")!, /script-src 'self'/);
     assert.doesNotMatch(await res.text(), new RegExp(gui.token), "token is not embedded in the page");
   });
-  test("static paths can't escape the public dir", async () => {
-    assert.equal((await fetch(base + "/..%2F..%2Fpackage.json")).status, 404);
+  test("static paths can't escape the UI build dir", async () => {
+    for (const p of ["/..%2F..%2Fpackage.json", "/assets/..%2F..%2F..%2Fpackage.json", "/src/main.tsx", "/assets/../../package.json", "/../../.env", "/assets/../../../.env"]) {
+      const s = await rawStatus({}, p);
+      assert.ok(s === 404 || s === 503, `${p} → ${s}`);
+    }
   });
 });
 

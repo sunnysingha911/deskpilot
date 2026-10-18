@@ -48,10 +48,15 @@ installed Chromium-family browser (Brave/Chrome) with an isolated profile in `da
 npm run gui
 ```
 
-Opens a desktop-style window (your installed Brave/Chrome in app mode) where you can create and edit
+Builds the React UI (`ui/`, Vite) and opens it in a desktop-style window (your installed Brave/Chrome
+in app mode), where you can create and edit
 agents, connect Claude / OpenAI / Grok / Gemini / Ollama, run tasks and watch each step live, approve
 or deny irreversible actions, and browse past runs and the full action log. The server listens on
 127.0.0.1 only and every API call needs a per-launch token.
+
+UI development with instant reload: `npm run dev:ui` (core API on :4747, Vite on :5173; open the
+printed URL). The UI is React + TypeScript + Vite + Tailwind + shadcn-style components, built to
+static files in `ui/dist` so it can later be loaded by an Electron or Tauri shell unchanged.
 
 ## Usage
 

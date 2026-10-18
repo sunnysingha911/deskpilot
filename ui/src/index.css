@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+/* shadcn-style design tokens; light by default, dark via the OS setting. */
+:root {
+  --background: oklch(0.985 0.002 250);
+  --foreground: oklch(0.21 0.02 260);
+  --card: oklch(1 0 0);
+  --muted: oklch(0.96 0.005 250);
+  --muted-foreground: oklch(0.52 0.02 260);
+  --border: oklch(0.91 0.008 250);
+  --input: oklch(0.91 0.008 250);
+  --primary: oklch(0.58 0.2 265);
+  --primary-foreground: oklch(0.99 0 0);
+  --accent: oklch(0.95 0.025 265);
+  --accent-foreground: oklch(0.45 0.18 265);
+  --ok: oklch(0.6 0.14 160);
+  --ok-soft: oklch(0.95 0.04 160);
+  --warn: oklch(0.65 0.14 75);
+  --warn-soft: oklch(0.96 0.05 85);
+  --bad: oklch(0.58 0.2 25);
+  --bad-soft: oklch(0.95 0.03 25);
+  --ring: oklch(0.58 0.2 265);
+  --radius: 0.65rem;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.17 0.01 260);
+    --foreground: oklch(0.93 0.01 260);
+    --card: oklch(0.21 0.012 260);
+    --muted: oklch(0.25 0.012 260);
+    --muted-foreground: oklch(0.68 0.015 260);
+    --border: oklch(0.3 0.012 260);
+    --input: oklch(0.32 0.012 260);
+    --primary: oklch(0.66 0.17 265);
+    --primary-foreground: oklch(0.15 0.01 260);
+    --accent: oklch(0.28 0.05 265);
+    --accent-foreground: oklch(0.8 0.1 265);
+    --ok: oklch(0.75 0.14 160);
+    --ok-soft: oklch(0.3 0.05 160);
+    --warn: oklch(0.8 0.14 80);
+    --warn-soft: oklch(0.32 0.05 80);
+    --bad: oklch(0.72 0.16 25);
+    --bad-soft: oklch(0.3 0.06 25);
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-ring: var(--ring);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+  }
+}

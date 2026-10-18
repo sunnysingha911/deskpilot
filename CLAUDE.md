@@ -51,8 +51,12 @@ src/platform/    DesktopBackend interface (types.ts) + per-OS backends (macos.ts
 src/llm/         ModelProvider interface (types.ts) + adapters (anthropic.ts, openai-compatible.ts)
 src/agent/       agent definition schema, system prompt + untrusted framing, the run loop
 agents/          agent definitions as JSON (data, not code)
-src/gui/         control panel: server.ts (localhost API + SSE), runs.ts (run manager, GUI approvals,
-                 provider fallback), public/ (plain HTML/CSS/JS UI, no build step)
+src/gui/         control panel backend: server.ts (localhost API + SSE, serves ui/dist), runs.ts
+                 (run manager, GUI approvals, provider fallback)
+ui/              control panel frontend: React 19 + TS + Vite + Tailwind 4 + shadcn-style components
+                 (ui/src/components/ui), React Router (hash routing), TanStack Query, react-hook-form.
+                 Builds to static ui/dist (gitignored) so Electron/Tauri can load it later.
+src/agent/schema.ts  browser-safe zod agent schema shared by core, CLI and UI
 src/llm/connections.ts  named provider connections, data/settings.json, write-only key storage in .env
 native/axhelper/ Swift package for AX API
 scripts/         hand-run CLIs / smoke checks
@@ -77,7 +81,7 @@ data/            SQLite DBs (gitignored)
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
-- `npm run gui` (control panel window) · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
+- `npm run gui` (build UI + open window) · `npm run dev:ui` (Vite dev with reload) · `npm run build:ui` · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
 - `npm run logs -- [n]`, `npm test`, `npm run typecheck`, `npm run build:native`, `npm run notes-demo`
 
 ## Agent loop invariants
@@ -93,7 +97,9 @@ data/            SQLite DBs (gitignored)
 ## GUI invariants
 - Server binds 127.0.0.1 only; every /api call needs the per-launch token (header, or `?t=` for SSE);
   Host must be 127.0.0.1/localhost:<port>; foreign Origin refused; strict CSP (no inline script/style).
-- UI renders all dynamic content via textContent (run output is untrusted); never innerHTML.
+- UI renders all dynamic content as React text (run output is untrusted); never dangerouslySetInnerHTML.
+- UI talks to the core only over HTTP/SSE with the token, so a desktop shell can host it unchanged.
+- UI deps are devDependencies (bundled at build time); core runtime deps stay minimal.
 - API keys are write-only: the API reports keySet booleans and never returns key values.
 - One active run at a time. Provider fallback only when a run fails before its first step
   (so no tool has run) and only when the user didn't pick a provider explicitly.

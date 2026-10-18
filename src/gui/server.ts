@@ -7,16 +7,16 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { dirname, extname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { extname, join } from "node:path";
 import { AGENTS_DIR, AgentDefinition } from "../agent/definition.ts";
 import { ActionLogger } from "../core/logger.ts";
-import { DATA_DIR } from "../core/paths.ts";
+import { DATA_DIR, ROOT } from "../core/paths.ts";
 import { getConnection, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
 import { availableTools } from "../tools/index.ts";
 import { RunManager } from "./runs.ts";
 
-const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "public");
+/** The React UI's production build (npm run build:ui). A desktop shell can load the same folder. */
+export const UI_DIST = join(ROOT, "ui", "dist");
 const MAX_BODY = 1024 * 1024;
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -276,11 +276,17 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
 
       // Static UI (no secrets in it; the token arrives in the launch URL and stays in the page).
       if (req.method !== "GET") throw new HttpError(405, "method not allowed");
+      if (!existsSync(join(UI_DIST, "index.html"))) {
+        res.writeHead(503, { "content-type": "text/plain; charset=utf-8", ...SECURITY_HEADERS });
+        res.end("The UI isn't built yet. Run: npm run build:ui");
+        return;
+      }
       const file = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-      if (!/^[\w.-]+$/.test(file)) throw new HttpError(404, "not found");
-      const path = join(PUBLIC_DIR, file);
+      // Only top-level files and assets/<file>: no other paths, no traversal.
+      if (!/^(assets\/)?[\w.-]+$/.test(file) || file.includes("..")) throw new HttpError(404, "not found");
+      const path = join(UI_DIST, file);
       if (!existsSync(path)) throw new HttpError(404, "not found");
-      const types: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
+      const types: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
       res.writeHead(200, { "content-type": `${types[extname(path)] ?? "application/octet-stream"}; charset=utf-8`, ...SECURITY_HEADERS });
       res.end(readFileSync(path));
     } catch (err) {
