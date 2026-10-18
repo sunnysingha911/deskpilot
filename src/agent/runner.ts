@@ -2,8 +2,18 @@
 import { randomUUID } from "node:crypto";
 import type { Executor } from "../core/executor.ts";
 import type { ActionLogger, RunStatus, RunSummary } from "../core/logger.ts";
-import { toolSpec } from "../core/tool.ts";
+import { defineTool, ToolError, toolSpec, type ToolDef } from "../core/tool.ts";
 import type { ModelProvider, ToolResultInput, TurnInput, Usage } from "../llm/types.ts";
+import {
+  DELEGATE_TOOL,
+  DelegateInput,
+  delegateDescription,
+  DelegateOutput,
+  delegatedTaskMessage,
+  delegationTargets,
+  type Delegation,
+  type ParentLink,
+} from "./delegate.ts";
 import { needsAlwaysAsk, resolveTools, type AgentDefinition } from "./definition.ts";
 import { buildSystemPrompt, formatToolResult } from "./prompt.ts";
 
@@ -14,6 +24,10 @@ export type RunEvent =
   | { type: "tool_call"; name: string; input: unknown }
   | { type: "tool_result"; name: string; status: string; risk: string; summary: string; logId?: number }
   | { type: "turn"; step: number; usage: Usage; servedBy: string }
+  | { type: "delegate_start"; runId: string; agent: string; task: string; depth: number }
+  | { type: "delegate_end"; runId: string; agent: string; status: string; steps: number; error?: string | undefined }
+  /** An event of a delegated (nested) run, forwarded into the parent's timeline. */
+  | { type: "sub"; runId: string; agent: string; depth: number; event: RunEvent }
   | { type: "end"; summary: RunSummary };
 
 export interface RunDeps {
@@ -26,10 +40,16 @@ export interface RunDeps {
   signal?: AbortSignal;
   /** Use this run id instead of generating one (lets a caller subscribe before the run starts). */
   runId?: string;
+  /** Lets this agent call other agents (agent.delegate). Without it, no delegation. */
+  delegation?: Delegation | undefined;
+  /** The run that started this one. */
+  parent?: ParentLink | undefined;
 }
 
 export interface RunResult extends RunSummary {
   runId: string;
+  /** Output tokens of this run plus every run it delegated to. */
+  totalOutputTokens: number;
 }
 
 export function newRunId(): string {
@@ -43,7 +63,30 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     const id = deps.logger.logRunEvent(runId, e);
     deps.onEvent?.(e, id);
   };
-  const tools = resolveTools(def, deps.executor.list());
+  const chain = deps.delegation?.chain ?? [];
+  const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  // Output tokens spent by agents this run called; they count against this run's budget too.
+  let delegatedOutputTokens = 0;
+  const started = Date.now();
+
+  const tools = resolveTools(def, deps.executor.list()).filter((t) => t.name !== DELEGATE_TOOL);
+  let executor = deps.executor;
+  if (deps.delegation) {
+    const delegateTool = makeDelegateTool(def, deps.delegation, {
+      parentRunId: runId,
+      deps,
+      emit: (e) => emit(e),
+      remaining: () => ({
+        outputTokens: def.budget.maxOutputTokens - usage.outputTokens - delegatedOutputTokens,
+        seconds: Math.floor(def.budget.maxSeconds - (Date.now() - started) / 1000),
+      }),
+      spent: (n) => (delegatedOutputTokens += n),
+    });
+    if (delegateTool) {
+      tools.push(delegateTool);
+      executor = deps.executor.withTools([delegateTool]);
+    }
+  }
   const allowed = new Set(tools.map((t) => t.name));
 
   const session = deps.provider.startSession({
@@ -57,11 +100,17 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
     effort: def.model.effort,
   });
 
-  deps.logger.startRun({ id: runId, agent: def.name, provider: deps.provider.id, model: def.model.id, task });
+  deps.logger.startRun({
+    id: runId,
+    agent: def.name,
+    provider: deps.provider.id,
+    model: def.model.id,
+    task,
+    parentRunId: deps.parent?.runId,
+    relation: deps.parent?.relation,
+  });
   emit({ type: "start", runId, tools: [...allowed] });
 
-  const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-  const started = Date.now();
   let steps = 0;
   let finalText: string | undefined;
   let status: RunStatus = "budget_exhausted";
@@ -79,7 +128,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
         error = `step budget (${def.budget.maxSteps}) exhausted`;
         break;
       }
-      if (usage.outputTokens >= def.budget.maxOutputTokens) {
+      if (usage.outputTokens + delegatedOutputTokens >= def.budget.maxOutputTokens) {
         error = `output token budget (${def.budget.maxOutputTokens}) exhausted`;
         break;
       }
@@ -140,10 +189,10 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
           emit({ type: "tool_result", name: call.name, status: "error", risk: "-", summary: "not allowed" });
           continue;
         }
-        const r = await deps.executor.call(
+        const r = await executor.call(
           call.name,
           call.input,
-          { caller: def.name, sessionId: runId },
+          { caller: def.name, sessionId: runId, chain: [...chain, def.name], ...(deps.signal && { signal: deps.signal }) },
           { forceApproval: needsAlwaysAsk(def, call.name) },
         );
         const formatted = formatToolResult(r);
@@ -167,5 +216,85 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
   const summary: RunSummary = { status, steps, usage, finalText, error };
   deps.logger.finishRun(runId, { ...summary, transcript: session.transcript() });
   emit({ type: "end", summary });
-  return { runId, ...summary };
+  return { runId, ...summary, totalOutputTokens: usage.outputTokens + delegatedOutputTokens };
+}
+
+const MIN_DELEGATE_TOKENS = 1000;
+const MIN_DELEGATE_SECONDS = 10;
+
+/** Build this run's agent.delegate tool, or null if the agent may not call anyone from here. */
+function makeDelegateTool(
+  def: AgentDefinition,
+  delegation: Delegation,
+  run: {
+    parentRunId: string;
+    deps: RunDeps;
+    emit: (e: RunEvent) => void;
+    remaining: () => { outputTokens: number; seconds: number };
+    spent: (outputTokens: number) => void;
+  },
+): ToolDef | null {
+  const chain = delegation.chain ?? [];
+  const targets: AgentDefinition[] = [];
+  for (const name of delegationTargets(def, delegation)) {
+    try {
+      targets.push(delegation.loadAgent(name));
+    } catch {
+      /* missing or invalid agent file: not offered */
+    }
+  }
+  if (!targets.length) return null;
+  const names = targets.map((t) => t.name) as [string, ...string[]];
+
+  return defineTool({
+    name: DELEGATE_TOOL,
+    description: delegateDescription(targets),
+    input: DelegateInput(names),
+    output: DelegateOutput,
+    // The call itself changes nothing; every action the called agent takes is classified and
+    // approved on its own. Add agent.delegate to approval.alwaysAsk to approve each hand-off.
+    baseRisk: "reversible",
+    untrustedOutput: true,
+    run: async (input) => {
+      const target = targets.find((t) => t.name === input.agent)!;
+      const left = run.remaining();
+      if (left.outputTokens < MIN_DELEGATE_TOKENS || left.seconds < MIN_DELEGATE_SECONDS) {
+        throw new ToolError("budget", `not enough budget left to delegate (${left.outputTokens} output tokens, ${left.seconds}s)`);
+      }
+      // The called agent can never outspend what the caller has left.
+      const bounded: AgentDefinition = {
+        ...target,
+        budget: {
+          ...target.budget,
+          maxOutputTokens: Math.min(target.budget.maxOutputTokens, left.outputTokens),
+          maxSeconds: Math.min(target.budget.maxSeconds, left.seconds),
+        },
+      };
+      const childChain = [...chain, def.name];
+      const childRunId = newRunId();
+      const depth = childChain.length;
+      run.emit({ type: "delegate_start", runId: childRunId, agent: target.name, task: input.task, depth });
+      const result = await runAgent(bounded, delegatedTaskMessage(childChain, input.task), {
+        provider: delegation.providerFor(target),
+        executor: run.deps.executor,
+        logger: run.deps.logger,
+        signal: run.deps.signal,
+        runId: childRunId,
+        parent: { runId: run.parentRunId, relation: "delegate" },
+        delegation: { loadAgent: delegation.loadAgent, providerFor: delegation.providerFor, chain: childChain },
+        // Nested runs' events already arrive wrapped; pass those through unchanged.
+        onEvent: (e) => run.emit(e.type === "sub" ? e : { type: "sub", runId: childRunId, agent: target.name, depth, event: e }),
+      });
+      run.spent(result.totalOutputTokens);
+      run.emit({ type: "delegate_end", runId: childRunId, agent: target.name, status: result.status, steps: result.steps, error: result.error });
+      return {
+        agent: target.name,
+        runId: childRunId,
+        status: result.status,
+        steps: result.steps,
+        answer: result.finalText ?? null,
+        error: result.error ?? null,
+      };
+    },
+  }) as ToolDef;
 }

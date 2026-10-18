@@ -1,20 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Play, Square } from "lucide-react";
+import { Forward, Play, Square, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
+import { parseMentions } from "../../../src/agent/schema.ts";
 import { PageHeader, useMeta } from "@/components/Layout";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input, NativeSelect, Textarea } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { api, get } from "@/lib/api";
-import type { AgentDefinition, ProvidersView } from "@/lib/types";
+import type { AgentDefinition, ProvidersView, RunDetail } from "@/lib/types";
 import { modelCache } from "@/pages/ProvidersPage";
 
-export const ownConnection = (a: AgentDefinition) => a.model.connection ?? (a.model.provider === "anthropic" ? "anthropic" : "openai");
+export const ownConnection = (a: AgentDefinition) =>
+  a.model.connection ?? (a.model.provider === "anthropic" ? "anthropic" : a.model.provider === "ollama" ? "ollama" : "openai");
 
 export function RunPage() {
   const toast = useToast();
@@ -28,6 +32,11 @@ export function RunPage() {
   const [model, setModel] = useState("");
   const [task, setTask] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
+  const [withAgents, setWithAgents] = useState<string[]>([]);
+  // "Send to agent…" on a finished run opens this page with ?from=<runId>.
+  const [params, setParams] = useSearchParams();
+  const fromRun = params.get("from");
+  const from = useQuery({ queryKey: ["run", fromRun], queryFn: () => get<RunDetail>(`/api/runs/${fromRun}`), enabled: !!fromRun });
 
   // Re-attach to a run that is already in progress (e.g. after reopening the window).
   useEffect(() => {
@@ -40,7 +49,15 @@ export function RunPage() {
   const running = !!runId && !stream.done;
 
   const start = useMutation({
-    mutationFn: () => api<{ runId: string }>("POST", "/api/runs", { agent: selected!.name, task, connection: connection || undefined, model: model || undefined }),
+    mutationFn: () =>
+      api<{ runId: string }>("POST", "/api/runs", {
+        agent: selected!.name,
+        task,
+        connection: connection || undefined,
+        model: model || undefined,
+        with: withAgents.filter((n) => n !== selected!.name && list.some((a) => a.name === n)),
+        fromRun: fromRun || undefined,
+      }),
     onSuccess: ({ runId }) => {
       localStorage.setItem("deskpilot-last-agent", selected!.name);
       setRunId(runId);
@@ -62,6 +79,8 @@ export function RunPage() {
     document.title = pending ? "⚠️ Approval needed · deskpilot" : "deskpilot";
   }, [stream.events]);
 
+  const others = list.filter((a) => a.name !== selected?.name);
+  const mentioned = useMemo(() => parseMentions(task, list.map((a) => a.name), selected?.name), [task, list, selected?.name]);
   const models = useMemo(() => modelCache.get(connection || (selected ? ownConnection(selected) : "")) ?? [], [connection, selected]);
 
   if (agents.isLoading) return null;
@@ -122,15 +141,55 @@ export function RunPage() {
             {selected.description || "—"} · tools: {selected.tools.join(", ")}
           </p>
         )}
+        {fromRun && (
+          <div className="mt-4 flex items-start gap-2 rounded-md border border-primary/40 bg-accent/40 p-3 text-sm">
+            <Forward className="mt-0.5 size-4 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              Continuing from{" "}
+              <Link className="text-primary hover:underline" to={`/runs/${fromRun}`}>
+                {from.data ? `${from.data.run.agent}'s run` : fromRun}
+              </Link>
+              . Its final answer is passed to the agent as data, after your task.
+              {from.data?.run.final_text && <div className="mt-1 line-clamp-3 text-xs whitespace-pre-wrap text-muted-foreground">{from.data.run.final_text}</div>}
+            </div>
+            <button className="cursor-pointer text-muted-foreground hover:text-foreground" title="Don't pass it on" onClick={() => setParams({})} disabled={running}>
+              <X className="size-4" />
+            </button>
+          </div>
+        )}
         <Field label="Task" className="mt-4">
           <Textarea
             value={task}
             onChange={(e) => setTask(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && submit()}
-            placeholder="What should the agent do?"
+            placeholder="What should the agent do? Write @agent-name to let it hand part of the work to another agent."
             className="min-h-20"
           />
         </Field>
+        {others.length > 0 && selected && (
+          <div className="mt-3">
+            <div className="text-xs font-medium text-muted-foreground">Agents it may hand work to in this run</div>
+            <div className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1.5">
+              {others.map((a) => {
+                const always = selected.canDelegateTo.includes(a.name);
+                const viaMention = mentioned.includes(a.name);
+                const on = always || viaMention || withAgents.includes(a.name);
+                return (
+                  <label key={a.name} className="flex cursor-pointer items-center gap-1.5 text-sm" title={a.description}>
+                    <Checkbox
+                      checked={on}
+                      disabled={always || viaMention || running}
+                      onCheckedChange={(v) => setWithAgents((w) => (v ? [...new Set([...w, a.name])] : w.filter((n) => n !== a.name)))}
+                    />
+                    <span className="font-mono text-[13px]">{a.name}</span>
+                    {always && <Badge>always</Badge>}
+                    {viaMention && !always && <Badge tone="info">@mentioned</Badge>}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div className="mt-4 flex items-center gap-2">
           <Button onClick={submit} disabled={running || start.isPending}>
             <Play /> Start

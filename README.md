@@ -6,7 +6,7 @@ risk-classified, and gated: anything irreversible (delete, send, submit, purchas
 approval.
 
 > Status: early. macOS backend working; Windows and Linux backends planned. Agents run on Anthropic
-> (Claude) or any OpenAI-compatible API (OpenAI, Grok, Gemini, Ollama).
+> (Claude), any OpenAI-compatible API (OpenAI, Grok, Gemini), or local models via Ollama.
 
 ## How it fits together
 
@@ -65,11 +65,31 @@ npm run tool -- list                                   # all tools with base ris
 npm run tool -- ui.dump_tree '{"app":"Notes","format":"text"}'
 npm run agent -- mac-helper "Which app is frontmost?"  # Claude
 npm run agent -- mac-helper-openai "Which app is frontmost?"  # OpenAI
+npm run agent -- mac-helper-ollama "Which app is frontmost?"  # local, via Ollama
 npm run logs -- 20                                     # recent actions
 npm test                                               # unit tests (no network, no LLM)
 ```
 
 Irreversible tool calls prompt `y/N` in an interactive terminal and are denied otherwise.
+
+## Agents working together
+
+An agent can hand a sub-task to another agent (`agent.delegate`) and gets its final answer back.
+Which agents it may call:
+
+- **Its definition:** `"canDelegateTo": ["notes-reader"]` (Agents → edit → *Can hand work to*).
+- **You, per run:** write `@agent-name` in the task, or tick agents under the task box in the panel.
+- **You, after a run:** *Send to agent…* on a finished run starts another agent with that run's answer.
+
+```sh
+npm run agent -- mac-helper-openai "Ask @notes-reader which buttons are in the Notes toolbar."
+```
+
+The called agent uses only its own tools and model, and every action still goes through risk checks,
+approvals and logging. Approvals show the whole chain (you → mac-helper → notes-reader). Its task is
+marked as coming from another agent, and its answer comes back as untrusted data. Delegation goes at
+most two levels deep, never loops, and the called agent's tokens and time count against the caller's
+budget. Add `agent.delegate` to `approval.alwaysAsk` (*Ask me before each hand-off*) to approve each one.
 
 ## Project docs
 

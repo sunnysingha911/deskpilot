@@ -7,6 +7,9 @@ export type ActionStatus = "ok" | "error" | "blocked";
 
 export type RunStatus = "completed" | "refused" | "max_tokens" | "budget_exhausted" | "stopped" | "error";
 
+/** How a run relates to the run that started it. */
+export type RunRelation = "delegate" | "handoff";
+
 export interface RunSummary {
   status: RunStatus;
   steps: number;
@@ -104,6 +107,11 @@ export class ActionLogger {
       );
       CREATE INDEX IF NOT EXISTS run_events_run ON run_events(run_id, id);
     `);
+    // Added with agent-to-agent runs; older databases get the columns on open.
+    const cols = new Set((this.db.prepare(`PRAGMA table_info(runs)`).all() as Array<{ name: string }>).map((c) => c.name));
+    if (!cols.has("parent_run_id")) this.db.exec(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`);
+    if (!cols.has("relation")) this.db.exec(`ALTER TABLE runs ADD COLUMN relation TEXT`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS runs_parent ON runs(parent_run_id)`);
     this.insertStmt = this.db.prepare(`
       INSERT INTO actions (os, session_id, caller, tool, risk, status, approved_by, input_json, output_json, error, duration_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -127,10 +135,10 @@ export class ActionLogger {
     return Number(res.lastInsertRowid);
   }
 
-  startRun(r: { id: string; agent: string; provider: string; model: string; task: string }): void {
+  startRun(r: { id: string; agent: string; provider: string; model: string; task: string; parentRunId?: string | undefined; relation?: RunRelation | undefined }): void {
     this.db
-      .prepare(`INSERT INTO runs (id, os, agent, provider, model, task) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(r.id, process.platform, r.agent, r.provider, r.model, r.task);
+      .prepare(`INSERT INTO runs (id, os, agent, provider, model, task, parent_run_id, relation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(r.id, process.platform, r.agent, r.provider, r.model, r.task, r.parentRunId ?? null, r.parentRunId ? (r.relation ?? "delegate") : null);
   }
 
   finishRun(id: string, f: RunSummary & { transcript: unknown }): void {
@@ -171,9 +179,16 @@ export class ActionLogger {
     return this.db
       .prepare(
         `SELECT id, started_at, ended_at, agent, provider, model, task, status, steps, input_tokens, output_tokens,
-                cache_read_tokens, cache_write_tokens, final_text, error FROM runs ORDER BY started_at DESC LIMIT ?`,
+                cache_read_tokens, cache_write_tokens, final_text, error, parent_run_id, relation FROM runs ORDER BY started_at DESC LIMIT ?`,
       )
       .all(limit) as Record<string, unknown>[];
+  }
+
+  /** Runs started from this one (delegations and hand-offs), oldest first. */
+  childRuns(id: string): Record<string, unknown>[] {
+    return this.db
+      .prepare(`SELECT id, started_at, ended_at, agent, model, task, status, steps, relation FROM runs WHERE parent_run_id = ? ORDER BY started_at, rowid`)
+      .all(id) as Record<string, unknown>[];
   }
 
   queryActions(f: { tool?: string; risk?: string; status?: string; sessionId?: string; limit?: number }): ActionRow[] {

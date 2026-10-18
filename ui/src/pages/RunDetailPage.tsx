@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Square, Wrench } from "lucide-react";
-import { Link, useParams } from "react-router";
+import { ArrowLeft, Forward, Square, Users, Wrench } from "lucide-react";
+import { Link, useNavigate, useParams } from "react-router";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
 import { StatusBadge } from "@/components/ui/badge";
@@ -23,6 +23,7 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
 export function RunDetailPage() {
   const { id = "" } = useParams();
   const toast = useToast();
+  const nav = useNavigate();
   const stream = useRunEvents(id);
   const detail = useQuery({ queryKey: ["run", id], queryFn: () => get<RunDetail>(`/api/runs/${id}`), refetchInterval: stream.done ? false : 3000 });
   const stop = useMutation({ mutationFn: () => api("POST", `/api/runs/${stream.currentRunId ?? id}/stop`), onError: (e) => toast((e as Error).message, true) });
@@ -42,6 +43,11 @@ export function RunDetailPage() {
         {!stream.done && d.active && (
           <Button variant="destructive" className="ml-auto" onClick={() => stop.mutate()} disabled={stop.isPending}>
             <Square /> Stop
+          </Button>
+        )}
+        {stream.done && r.final_text && (
+          <Button variant="outline" className="ml-auto" onClick={() => nav(`/run?from=${encodeURIComponent(r.id)}`)} title="Start another agent with this run's answer">
+            <Forward /> Send to agent…
           </Button>
         )}
       </div>
@@ -64,6 +70,29 @@ export function RunDetailPage() {
         <p className="mt-2 text-xs text-muted-foreground">
           {r.id} · started {fmtTime(r.started_at)}
         </p>
+        {r.parent_run_id && (
+          <p className="mt-2 text-sm">
+            {r.relation === "handoff" ? "Continued from " : "Called by "}
+            <Link className="text-primary hover:underline" to={`/runs/${r.parent_run_id}`}>
+              {r.parent_run_id}
+            </Link>
+          </p>
+        )}
+        {d.children.length > 0 && (
+          <div className="mt-3 border-t pt-3">
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <Users className="size-3.5" /> Runs started from this one
+            </div>
+            {d.children.map((c) => (
+              <Link key={c.id} to={`/runs/${c.id}`} className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted">
+                <span className="text-xs text-muted-foreground">{c.relation === "handoff" ? "handed on to" : "delegated to"}</span>
+                <b>{c.agent}</b>
+                <StatusBadge value={c.status} />
+                <span className="truncate text-xs text-muted-foreground">{c.task}</span>
+              </Link>
+            ))}
+          </div>
+        )}
       </Card>
       <CardTitle className="mt-6 mb-3">Workflow</CardTitle>
       {legacy ? (

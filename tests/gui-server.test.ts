@@ -15,6 +15,7 @@ const logger = new ActionLogger(join(tmp, "actions.db"));
 const SETTINGS = join(DATA_DIR, "settings.json");
 const settingsBackup = existsSync(SETTINGS) ? readFileSync(SETTINGS, "utf8") : null;
 const AGENT = "zz-gui-test";
+const HELPER = "zz-gui-test-helper";
 const MARKER = join(SCRATCH_DIR, "zz-gui-test-marker.txt");
 
 let gui: GuiServer;
@@ -40,6 +41,7 @@ after(async () => {
   mock.close();
   logger.close();
   rmSync(join(AGENTS_DIR, `${AGENT}.json`), { force: true });
+  rmSync(join(AGENTS_DIR, `${HELPER}.json`), { force: true });
   if (settingsBackup === null) rmSync(SETTINGS, { force: true });
   else writeFileSync(SETTINGS, settingsBackup);
   rmSync(MARKER, { force: true });
@@ -141,11 +143,17 @@ describe("providers", () => {
     assert.equal((await call("PUT", "/api/providers/xai/key", { key: "has a space" })).status, 400);
   });
   test("settings round-trip", async () => {
-    const r = await call("PUT", "/api/providers/ollama", { baseUrl: mockUrl, defaultModel: "mock-model" });
+    // The mock speaks the OpenAI-compatible API, so it stands in for the xai connection.
+    const r = await call("PUT", "/api/providers/xai", { baseUrl: mockUrl, defaultModel: "mock-model" });
     assert.equal(r.status, 200);
-    const o = r.body.connections.find((c: any) => c.id === "ollama");
+    const o = r.body.connections.find((c: any) => c.id === "xai");
     assert.equal(o.baseUrl, mockUrl);
     assert.equal(o.defaultModel, "mock-model");
+  });
+  test("ollama context length is configurable and validated", async () => {
+    const ok = await call("PUT", "/api/providers/ollama", { contextLength: 16384 });
+    assert.equal(ok.body.connections.find((c: any) => c.id === "ollama").contextLength, 16384);
+    assert.equal((await call("PUT", "/api/providers/ollama", { contextLength: 100 })).status, 400);
   });
 });
 
@@ -161,7 +169,7 @@ describe("agents", () => {
       description: "gui test",
       system: "Test agent.",
       tools: ["shell.run"],
-      model: { provider: "openai-compatible", connection: "ollama", id: "mock-model" },
+      model: { provider: "openai-compatible", connection: "xai", id: "mock-model" },
       budget: { maxSteps: 5 },
     };
     assert.equal((await call("PUT", `/api/agents/${AGENT}`, def)).status, 200);
@@ -176,6 +184,7 @@ describe("a full run through the GUI", () => {
       { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "shell__run", arguments: JSON.stringify({ command: `rm -f ${MARKER}` }) } }] }, finish_reason: "tool_calls" }] },
       { choices: [{ message: { role: "assistant", content: "Couldn't delete it: you declined." }, finish_reason: "stop" }] },
     );
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
     const start = await call("POST", "/api/runs", { agent: AGENT, task: "delete the marker file" });
     assert.equal(start.status, 200, JSON.stringify(start.body));
     const { runId } = start.body;
@@ -211,5 +220,66 @@ describe("a full run through the GUI", () => {
     const replay = await readEvents(runId, (t) => t.includes("idle"));
     assert.deepEqual(replay.map((e) => e.type), types.filter((t) => t !== "closed").concat(types.includes("closed") ? ["closed"] : []));
     assert.ok((await call("GET", "/api/runs")).body.some((r: any) => r.id === runId));
+    delete process.env.XAI_API_KEY;
+  });
+});
+
+describe("agents working together through the GUI", () => {
+  const toolCall = (name: string, args: object) => ({
+    choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: `c-${name}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }],
+  });
+  const reply = (content: string) => ({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }] });
+
+  test("@mention lets the agent delegate; the helper's approval shows on the top run with the chain", async () => {
+    const helper = { name: HELPER, description: "deletes files", system: "Helper.", tools: ["shell.run"], model: { provider: "openai-compatible", connection: "xai", id: "mock-model" } };
+    assert.equal((await call("PUT", `/api/agents/${HELPER}`, helper)).status, 200);
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
+    assert.equal((await call("POST", "/api/runs", { agent: AGENT, task: "x", with: ["no-such-agent"] })).status, 400);
+
+    mockReplies.push(
+      toolCall("agent__delegate", { agent: HELPER, task: "delete the marker file" }),
+      toolCall("shell__run", { command: `rm -f ${MARKER}` }),
+      reply("I was not allowed to delete it."),
+      reply("The helper couldn't delete it."),
+    );
+    const start = await call("POST", "/api/runs", { agent: AGENT, task: `ask @${HELPER} to delete the marker` });
+    assert.equal(start.status, 200, JSON.stringify(start.body));
+    const { runId } = start.body;
+    let approval: any;
+    const events = await readEvents(
+      runId,
+      (t) => t.includes("closed"),
+      async (type, data) => {
+        if (type === "approval_request") {
+          approval = data;
+          assert.equal((await call("POST", `/api/runs/${runId}/approvals/${data.id}`, { approved: false })).status, 200);
+        }
+      },
+    );
+    assert.deepEqual(approval.chain, [AGENT, HELPER]);
+    assert.ok(approval.subRunId && approval.subRunId !== runId);
+    const types = events.map((e) => e.type);
+    for (const t of ["delegate_start", "sub", "delegate_end", "end"]) assert.ok(types.includes(t), `missing ${t}`);
+    assert.equal(readFileSync(MARKER, "utf8"), "must survive");
+
+    const detail = await call("GET", `/api/runs/${runId}`);
+    assert.equal(detail.body.run.final_text, "The helper couldn't delete it.");
+    assert.equal(detail.body.children.length, 1);
+    assert.equal(detail.body.children[0].agent, HELPER);
+    assert.equal(detail.body.children[0].relation, "delegate");
+    const child = await call("GET", `/api/runs/${approval.subRunId}`);
+    assert.equal(child.body.run.parent_run_id, runId);
+    assert.equal(child.body.actions[0].status, "blocked");
+
+    // Hand-off: start the helper from that run's answer.
+    mockReplies.push(reply("Summary: nothing was deleted."));
+    const next = await call("POST", "/api/runs", { agent: HELPER, task: "summarize this", fromRun: runId });
+    assert.equal(next.status, 200, JSON.stringify(next.body));
+    await readEvents(next.body.runId, (t) => t.includes("closed"));
+    const h = (await call("GET", `/api/runs/${next.body.runId}`)).body.run;
+    assert.equal(h.parent_run_id, runId);
+    assert.equal(h.relation, "handoff");
+    assert.match(h.task, /^summarize this\n[\s\S]*<untrusted_data source="run:/);
+    delete process.env.XAI_API_KEY;
   });
 });

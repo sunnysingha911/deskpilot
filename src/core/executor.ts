@@ -14,6 +14,8 @@ export interface ApprovalRequest {
   sessionId: string;
   /** Why approval is needed: the action is irreversible, or an agent rule requires it. */
   reason: "irreversible" | "rule";
+  /** Agents that led to this call, outermost first (set when one agent delegated to another). */
+  chain?: string[];
 }
 export interface ApprovalDecision {
   approved: boolean;
@@ -49,6 +51,11 @@ export class Executor {
       if (this.tools.has(t.name)) throw new Error(`duplicate tool ${t.name}`);
       this.tools.set(t.name, t);
     }
+  }
+
+  /** Same logger and approver, plus extra tools (e.g. a run's agent.delegate). */
+  withTools(extra: ToolDef[]): Executor {
+    return new Executor([...this.tools.values(), ...extra], this.logger, this.approver);
   }
 
   list(): ToolDef[] {
@@ -129,7 +136,7 @@ export class Executor {
     let approvedBy: string | undefined;
     if (risk === "irreversible" || opts.forceApproval) {
       const reason = risk === "irreversible" ? "irreversible" : "rule";
-      const decision = await this.approver({ tool: name, risk, input: logInput, caller: fullCtx.caller, sessionId: fullCtx.sessionId, reason });
+      const decision = await this.approver({ tool: name, risk, input: logInput, caller: fullCtx.caller, sessionId: fullCtx.sessionId, reason, ...(fullCtx.chain && { chain: fullCtx.chain }) });
       if (!decision.approved) {
         const what = reason === "irreversible" ? "is irreversible" : "requires approval for this agent";
         return finish("blocked", risk, logInput, {

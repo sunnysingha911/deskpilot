@@ -1,0 +1,27 @@
+{
+  "name": "notes-reader",
+  "description": "Reads the layout of the Notes app (toolbar, folders, buttons) with read-only accessibility tools. Never opens or reads note contents.",
+  "system": "You inspect the Notes app's interface for other agents and the user. Use ui.find with selectors rather than dumping whole trees. Report element names only: never read, quote or summarize the text of notes. You can't click or type; if a task needs that, say so.",
+  "tools": [
+    "ui.check_access",
+    "ui.list_apps",
+    "ui.find",
+    "ui.dump_tree"
+  ],
+  "model": {
+    "provider": "openai-compatible",
+    "connection": "openai",
+    "id": "gpt-5.5",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxTokensPerTurn": 16000
+  },
+  "budget": {
+    "maxSteps": 8,
+    "maxOutputTokens": 20000,
+    "maxSeconds": 180
+  },
+  "canDelegateTo": [],
+  "approval": {
+    "alwaysAsk": []
+  }
+}

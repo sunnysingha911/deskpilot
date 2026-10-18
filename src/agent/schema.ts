@@ -2,16 +2,17 @@
 import { z } from "zod";
 
 const ToolPattern = z.string().regex(/^[a-z_]+(\.[a-z_]+|\.\*)?$|^\*$/, 'tool name or glob like "ui.*"');
+export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 export const AgentDefinition = z
   .object({
-    name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    name: z.string().regex(AGENT_NAME_RE),
     description: z.string(),
     system: z.string().min(1).describe("Role-specific instructions; the safety preamble is added automatically"),
     tools: z.array(ToolPattern).min(1),
     model: z
       .object({
-        provider: z.enum(["anthropic", "openai-compatible"]),
+        provider: z.enum(["anthropic", "openai-compatible", "ollama"]),
         /** Named connection from the provider registry (e.g. "openai", "xai"); fills baseUrl/apiKeyEnv. */
         connection: z.string().regex(/^[a-z0-9-]+$/).optional(),
         id: z.string().min(1),
@@ -29,6 +30,8 @@ export const AgentDefinition = z
       })
       .strict()
       .prefault({}),
+    /** Other agents this one may hand sub-tasks to (gives it the agent.delegate tool). */
+    canDelegateTo: z.array(z.string().regex(AGENT_NAME_RE)).default([]),
     approval: z
       .object({
         /** Tools (or globs) that need approval on every call, whatever their risk. Irreversible always does. */
@@ -44,4 +47,14 @@ export function matchesPattern(pattern: string, toolName: string): boolean {
   if (pattern === "*") return true;
   if (pattern.endsWith(".*")) return toolName.startsWith(pattern.slice(0, -1));
   return pattern === toolName;
+}
+
+/** Agents named as @name in a task, in order, limited to known names and excluding `self`. */
+export function parseMentions(task: string, known: string[], self?: string): string[] {
+  const out: string[] = [];
+  for (const m of task.matchAll(/(?<![\w@.-])@([a-z0-9][a-z0-9-]*)/g)) {
+    const name = m[1]!.replace(/-+$/, "");
+    if (name !== self && known.includes(name) && !out.includes(name)) out.push(name);
+  }
+  return out;
 }

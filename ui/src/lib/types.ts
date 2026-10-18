@@ -18,12 +18,13 @@ export interface Meta {
 export interface Connection {
   id: string;
   label: string;
-  kind: "anthropic" | "openai-compatible";
+  kind: "anthropic" | "openai-compatible" | "ollama";
   baseUrl: string | null;
   keyEnv: string | null;
   keySet: boolean;
   defaultModel: string;
   enabled: boolean;
+  contextLength: number | null;
 }
 export interface ProvidersView {
   settings: { providerOrder: string[]; fallbackOnStartFailure: boolean };
@@ -45,6 +46,20 @@ export interface RunRow {
   cache_write_tokens: number;
   final_text: string | null;
   error: string | null;
+  /** The run that started this one: it delegated to this agent, or the user handed its answer on. */
+  parent_run_id: string | null;
+  relation: "delegate" | "handoff" | null;
+}
+export interface ChildRun {
+  id: string;
+  started_at: string;
+  ended_at: string | null;
+  agent: string;
+  model: string;
+  task: string;
+  status: string;
+  steps: number;
+  relation: "delegate" | "handoff";
 }
 export interface ActionRow {
   id: number;
@@ -63,6 +78,7 @@ export interface ActionRow {
 }
 export interface RunDetail {
   run: RunRow;
+  children: ChildRun[];
   active: boolean;
   actions: ActionRow[];
 }

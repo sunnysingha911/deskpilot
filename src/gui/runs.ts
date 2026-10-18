@@ -1,7 +1,8 @@
 // Run manager for the GUI: starts runs, streams events, routes approvals to the window, handles stop
 // and provider fallback. One active run at a time, since desktop actions from two agents would collide.
 import { randomUUID } from "node:crypto";
-import { loadAgent, type AgentDefinition } from "../agent/definition.ts";
+import { handoffTaskMessage, type ParentLink } from "../agent/delegate.ts";
+import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../agent/definition.ts";
 import { newRunId, runAgent, type RunEvent } from "../agent/runner.ts";
 import { Executor, type ApprovalDecision, type ApprovalRequest, type Approver } from "../core/executor.ts";
 import type { ActionLogger } from "../core/logger.ts";
@@ -30,6 +31,10 @@ interface Active {
 
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Connection id for agent files that only name a provider kind. */
+export const defaultConnectionFor = (kind: AgentDefinition["model"]["provider"]) =>
+  kind === "anthropic" ? "anthropic" : kind === "ollama" ? "ollama" : "openai";
+
 export interface StartRequest {
   agent: string;
   task: string;
@@ -37,6 +42,19 @@ export interface StartRequest {
   connection?: string | undefined;
   /** Override the model id (with or without a connection override). */
   model?: string | undefined;
+  /** Agents the user lets this run call, on top of the agent's canDelegateTo (plus any @mentions in the task). */
+  with?: string[] | undefined;
+  /** Start from this earlier run's final answer (passed to the agent as data). */
+  fromRun?: string | undefined;
+}
+
+/** Provider for an agent called by another agent: its own connection, no fallback. */
+export function providerForAgent(def: AgentDefinition) {
+  const id = def.model.connection ?? defaultConnectionFor(def.model.provider);
+  const conn = getConnection(id);
+  if (!conn) throw new Error(`agent ${def.name}: unknown connection '${id}'`);
+  if (!conn.enabled) throw new Error(`agent ${def.name}: ${conn.label} is disabled in Providers`);
+  return createProvider(toModelSpec(conn, def.model.id));
 }
 
 export class RunManager {
@@ -74,7 +92,7 @@ export class RunManager {
   private plan(def: AgentDefinition, req: StartRequest): Array<{ conn: Connection; model: string }> {
     const settings = loadSettings();
     const conns = listConnections(settings);
-    const own = req.connection ?? def.model.connection ?? (def.model.provider === "anthropic" ? "anthropic" : "openai");
+    const own = req.connection ?? def.model.connection ?? defaultConnectionFor(def.model.provider);
     const first = getConnection(own, settings);
     if (!first) throw new Error(`unknown connection '${own}'`);
     const firstModel = req.model || (req.connection && req.connection !== def.model.connection ? first.defaultModel : def.model.id);
@@ -93,6 +111,20 @@ export class RunManager {
   start(req: StartRequest): { runId: string } {
     if (this.active) throw Object.assign(new Error(`run ${this.active.runId} is still in progress`), { status: 409 });
     const def = loadAgent(req.agent);
+    const known = listAgents().map((a) => a.name);
+    for (const n of req.with ?? []) if (!known.includes(n)) throw new Error(`unknown agent '${n}'`);
+    const userAllowed = [...new Set([...(req.with ?? []), ...parseMentions(req.task, known, def.name)])].filter((n) => n !== def.name);
+
+    let task = req.task;
+    let parent: ParentLink | undefined;
+    if (req.fromRun) {
+      const prev = this.logger.getRun(req.fromRun);
+      if (!prev) throw new Error(`no such run '${req.fromRun}'`);
+      if (typeof prev.final_text !== "string" || !prev.final_text) throw new Error(`run ${req.fromRun} has no final answer to pass on`);
+      task = handoffTaskMessage(req.task, { agent: String(prev.agent), runId: req.fromRun, finalText: prev.final_text });
+      parent = { runId: req.fromRun, relation: "handoff" };
+    }
+
     const attempts = this.plan(def, req);
     const firstConn = attempts[0]!.conn;
     if (!keyIsSet(firstConn) && attempts.length === 1) throw new Error(`${firstConn.label}: ${firstConn.keyEnv} is not set`);
@@ -104,9 +136,20 @@ export class RunManager {
     const approver: Approver = (r) =>
       new Promise<ApprovalDecision>((resolve) => {
         const id = randomUUID().slice(0, 8);
-        const timer = setTimeout(() => this.decide(r.sessionId, id, false, "policy:timeout"), APPROVAL_TIMEOUT_MS);
+        // Approvals from nested (delegated) runs surface on the top-level run the user is watching.
+        const timer = setTimeout(() => this.decide(active.runId, id, false, "policy:timeout"), APPROVAL_TIMEOUT_MS);
         active.pending.set(id, { req: r, resolve, timer });
-        this.publish(r.sessionId, { type: "approval_request", id, tool: r.tool, risk: r.risk, reason: r.reason, input: r.input });
+        this.publish(active.runId, {
+          type: "approval_request",
+          id,
+          tool: r.tool,
+          risk: r.risk,
+          reason: r.reason,
+          input: r.input,
+          caller: r.caller,
+          chain: r.chain ?? [r.caller],
+          ...(r.sessionId !== active.runId && { subRunId: r.sessionId }),
+        });
       });
 
     void (async () => {
@@ -125,7 +168,7 @@ export class RunManager {
             provider = createProvider(toModelSpec(conn, model));
           } catch (err) {
             // Couldn't even build the client (e.g. missing key): record a failed attempt and move on.
-            this.logger.startRun({ id: currentRunId, agent: def.name, provider: conn.kind, model, task: req.task });
+            this.logger.startRun({ id: currentRunId, agent: def.name, provider: conn.kind, model, task, parentRunId: parent?.runId, relation: parent?.relation });
             const msg = err instanceof Error ? err.message : String(err);
             this.logger.finishRun(currentRunId, { status: "error", steps: 0, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: msg, transcript: [] });
             this.publish(currentRunId, { type: "end", summary: { status: "error", steps: 0, error: msg } });
@@ -136,11 +179,13 @@ export class RunManager {
             continue;
           }
           this.publish(currentRunId, { type: "attempt", connection: conn.id, label: conn.label, model, attempt: i + 1 });
-          const result = await runAgent(attemptDef, req.task, {
+          const result = await runAgent(attemptDef, task, {
             provider,
             executor,
             logger: this.logger,
             runId: currentRunId,
+            parent,
+            delegation: { loadAgent, providerFor: providerForAgent, userAllowed },
             signal: active.controller.signal,
             onEvent: (e, id) => this.publish(currentRunId, e, id),
           });

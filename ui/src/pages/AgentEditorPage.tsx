@@ -31,7 +31,12 @@ interface FormValues {
   maxSeconds: number;
   tools: string[];
   alwaysAsk: string[];
+  canDelegateTo: string[];
+  askDelegate: boolean;
 }
+
+/** The delegation tool isn't in the OS tool list, so its "ask" rule is kept separately. */
+const DELEGATE_TOOL = "agent.delegate";
 
 const BLANK: AgentDefinition = {
   name: "",
@@ -41,6 +46,7 @@ const BLANK: AgentDefinition = {
   model: { provider: "openai-compatible", connection: "openai", id: "", maxTokensPerTurn: 16_000 },
   budget: { maxSteps: 20, maxOutputTokens: 60_000, maxSeconds: 300 },
   approval: { alwaysAsk: [] },
+  canDelegateTo: [],
 };
 
 /** Expand globs ("ui.*") into the concrete tools they cover. */
@@ -91,6 +97,8 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
       maxSeconds: source.budget.maxSeconds,
       tools: expand(source.tools, tools),
       alwaysAsk: expand(source.approval.alwaysAsk, tools),
+      canDelegateTo: source.canDelegateTo,
+      askDelegate: source.approval.alwaysAsk.includes(DELEGATE_TOOL),
     });
     setModels(modelCache.get(ownConnection(source)) ?? []);
   }, [source, tools, mode, reset]);
@@ -98,6 +106,7 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
   const conn = prov.data?.connections.find((c) => c.id === watch("connection"));
   const selected = watch("tools") ?? [];
   const asks = watch("alwaysAsk") ?? [];
+  const delegates = watch("canDelegateTo") ?? [];
   const toggle = (field: "tools" | "alwaysAsk", list: string[], tool: string, on: boolean) =>
     setValue(field, on ? [...new Set([...list, tool])] : list.filter((t) => t !== tool), { shouldDirty: true });
 
@@ -112,13 +121,14 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
         provider: c.kind,
         connection: c.id,
         id: v.modelId.trim() || c.defaultModel,
-        ...(c.kind === "openai-compatible" && c.baseUrl && { baseUrl: c.baseUrl }),
-        ...(c.keyEnv && c.kind !== "anthropic" && { apiKeyEnv: c.keyEnv }),
+        ...(c.kind !== "anthropic" && c.baseUrl && { baseUrl: c.baseUrl }),
+        ...(c.keyEnv && c.kind === "openai-compatible" && { apiKeyEnv: c.keyEnv }),
         ...(v.effort && { effort: v.effort }),
         maxTokensPerTurn: Number(v.maxTokensPerTurn),
       },
       budget: { maxSteps: Number(v.maxSteps), maxOutputTokens: Number(v.maxOutputTokens), maxSeconds: Number(v.maxSeconds) },
-      approval: { alwaysAsk: compress(v.alwaysAsk, tools) },
+      canDelegateTo: v.canDelegateTo ?? [],
+      approval: { alwaysAsk: [...compress(v.alwaysAsk, tools), ...(v.askDelegate ? [DELEGATE_TOOL] : [])] },
     };
   }
 
@@ -142,6 +152,8 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
   if (!source || !tools.length || !prov.data) return null;
 
   const families = [...new Set(tools.map((t) => familyOf(t.name)))];
+  const thisName = mode === "edit" ? name : undefined;
+  const others = (agents.data ?? []).filter((a) => a.name !== thisName && a.name !== watch("name")?.trim());
 
   return (
     <form onSubmit={onSubmit}>
@@ -278,6 +290,34 @@ export function AgentEditorPage({ mode }: { mode: "new" | "edit" | "copy" }) {
               );
             })}
           </div>
+        </section>
+
+        <section>
+          <CardTitle>Can hand work to</CardTitle>
+          <p className="mt-1 mb-3 text-xs text-muted-foreground">
+            Agents this one may pass sub-tasks to on its own. They use their own tools and model, and their actions still need your approval as usual. You can also allow
+            others for a single run by writing <code className="font-mono">@agent-name</code> in the task.
+          </p>
+          {others.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No other agents yet.</p>
+          ) : (
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(290px,1fr))] gap-x-6 gap-y-1">
+              {others.map((a) => (
+                <label key={a.name} className="flex cursor-pointer items-center gap-2 py-0.5 text-sm" title={a.description}>
+                  <Checkbox
+                    checked={delegates.includes(a.name)}
+                    onCheckedChange={(v) => setValue("canDelegateTo", v ? [...new Set([...delegates, a.name])] : delegates.filter((n) => n !== a.name), { shouldDirty: true })}
+                  />
+                  <span className="font-mono text-[13px] font-semibold">{a.name}</span>
+                  <span className="truncate text-xs text-muted-foreground">{a.description}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm">
+            <Checkbox checked={!!watch("askDelegate")} onCheckedChange={(v) => setValue("askDelegate", !!v, { shouldDirty: true })} />
+            Ask me before each hand-off
+          </label>
         </section>
 
         {issues.length > 0 && (

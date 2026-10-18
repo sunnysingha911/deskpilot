@@ -15,8 +15,10 @@ import type { Connection, ProvidersView } from "@/lib/types";
 /** Model ids per connection, filled by "Test & list models" (shared with the Run and editor screens). */
 export const modelCache = new Map<string, string[]>();
 
-export async function loadModels(id: string): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
-  const r = await api<{ ok: true; models: string[] } | { ok: false; error: string }>("POST", `/api/providers/${id}/test`).catch((e) => ({ ok: false as const, error: (e as Error).message }));
+type TestResult = { ok: true; models: string[]; note?: string } | { ok: false; error: string };
+
+export async function loadModels(id: string): Promise<TestResult> {
+  const r = await api<TestResult>("POST", `/api/providers/${id}/test`).catch((e) => ({ ok: false as const, error: (e as Error).message }));
   if (r.ok) modelCache.set(id, r.models);
   return r;
 }
@@ -30,13 +32,19 @@ function ConnectionCard({ c }: { c: Connection }) {
   const [baseUrl, setBaseUrl] = useState(c.baseUrl ?? "");
   const [model, setModel] = useState(c.defaultModel);
   const [enabled, setEnabled] = useState(c.enabled);
+  const [contextLength, setContextLength] = useState(String(c.contextLength ?? ""));
   const [models, setModels] = useState(modelCache.get(c.id) ?? []);
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
 
   const save = useMutation({
     mutationFn: async () => {
       if (key.trim()) await api("PUT", `/api/providers/${c.id}/key`, { key: key.trim() });
-      await api("PUT", `/api/providers/${c.id}`, { defaultModel: model, enabled, ...(c.kind !== "anthropic" && { baseUrl }) });
+      await api("PUT", `/api/providers/${c.id}`, {
+        defaultModel: model,
+        enabled,
+        ...(c.kind !== "anthropic" && { baseUrl }),
+        ...(c.kind === "ollama" && contextLength && { contextLength: Number(contextLength) }),
+      });
     },
     onSuccess: () => {
       setKey("");
@@ -50,7 +58,7 @@ function ConnectionCard({ c }: { c: Connection }) {
     onSuccess: (r) => {
       if (r.ok) {
         setModels(r.models);
-        setTest({ ok: true, text: `${r.models.length} models available. Pick one as the default model.` });
+        setTest({ ok: true, text: `${r.models.length} models available. Pick one as the default model.${r.note ? ` ${r.note}` : ""}` });
       } else setTest({ ok: false, text: r.error });
     },
   });
@@ -72,6 +80,11 @@ function ConnectionCard({ c }: { c: Connection }) {
       {c.kind !== "anthropic" && (
         <Field label="Base URL">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+        </Field>
+      )}
+      {c.kind === "ollama" && (
+        <Field label="Context window (tokens)" hint="Ollama's num_ctx. Larger uses more memory; changing it reloads the model once.">
+          <Input type="number" min={2048} step={1024} value={contextLength} onChange={(e) => setContextLength(e.target.value)} />
         </Field>
       )}
       <Field label="Default model">

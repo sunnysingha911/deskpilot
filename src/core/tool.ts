@@ -7,6 +7,8 @@ export interface ToolContext {
   /** Who is calling: "cli", an agent name, a test. Logged. */
   caller: string;
   sessionId: string;
+  /** Agents that led to this call, outermost first, ending with the caller (["mac-helper", "coder"]). */
+  chain?: string[];
   signal?: AbortSignal;
 }
 

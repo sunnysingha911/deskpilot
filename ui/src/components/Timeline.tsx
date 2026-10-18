@@ -1,7 +1,8 @@
 // Run workflow timeline, shared by the live view and run history. Every value from a run is
 // rendered as React text (escaped); run output is untrusted and must never become HTML.
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRightLeft, Bot, Brain, CircleCheck, CircleX, ShieldAlert, Wrench } from "lucide-react";
+import { ArrowRightLeft, Bot, Brain, CircleCheck, CircleX, ShieldAlert, Users, Wrench } from "lucide-react";
+import { Link } from "react-router";
 import { useState, type ReactNode } from "react";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,11 +17,30 @@ type Ev = RunStream["events"][number];
 type Item =
   | { kind: "event"; ev: Ev }
   | { kind: "tool"; call: Ev; result?: Ev }
-  | { kind: "approval"; req: Ev; resolved?: Ev };
+  | { kind: "approval"; req: Ev; resolved?: Ev }
+  | { kind: "delegate"; start: Ev; end?: Ev; items: Item[] };
 
-/** Pair tool_call with its tool_result and approval_request with its resolution. */
+/**
+ * Events of runs this run delegated to arrive wrapped ({type:"sub", runId, event}) in one flat stream,
+ * whatever their depth. Unwrap them per run, then nest each run's items under its delegate_start.
+ */
 function buildItems(events: Ev[]): Item[] {
+  const byRun = new Map<string, Ev[]>();
+  const top: Ev[] = [];
+  for (const ev of events) {
+    if (ev.type === "sub" && ev.event) {
+      const list = byRun.get(ev.runId) ?? [];
+      list.push({ ...ev.event, _runId: ev.runId, _key: ev._key });
+      byRun.set(ev.runId, list);
+    } else top.push(ev);
+  }
+  return groupItems(top, byRun);
+}
+
+/** Pair tool_call with its tool_result and approval_request with its resolution; nest delegated runs. */
+function groupItems(events: Ev[], byRun: Map<string, Ev[]>): Item[] {
   const items: Item[] = [];
+  const delegates = new Map<string, Extract<Item, { kind: "delegate" }>>();
   const openTools: Array<Extract<Item, { kind: "tool" }>> = [];
   const approvals = new Map<string, Extract<Item, { kind: "approval" }>>();
   for (const ev of events) {
@@ -38,6 +58,13 @@ function buildItems(events: Ev[]): Item[] {
     } else if (ev.type === "approval_resolved") {
       const it = approvals.get(`${ev._runId}:${ev.id}`);
       if (it) it.resolved = ev;
+    } else if (ev.type === "delegate_start") {
+      const it = { kind: "delegate" as const, start: ev, items: groupItems(byRun.get(ev.runId) ?? [], byRun) };
+      delegates.set(ev.runId, it);
+      items.push(it);
+    } else if (ev.type === "delegate_end") {
+      const it = delegates.get(ev.runId);
+      if (it) it.end = ev;
     } else if (ev.type !== "closed") {
       items.push({ kind: "event", ev });
     }
@@ -119,6 +146,11 @@ function ApprovalItem({ req, resolved }: { req: Ev; resolved?: Ev }) {
       <div className="flex flex-wrap items-center gap-2">
         <ShieldAlert className="size-4 text-bad" />
         <b>Approval needed:</b>
+        {Array.isArray(req.chain) && req.chain.length > 1 && (
+          <span className="text-sm">
+            you → {req.chain.join(" → ")} wants to run
+          </span>
+        )}
         <span className="font-mono text-[13px] font-semibold">{req.tool}</span>
         <StatusBadge value={req.risk} />
         {req.reason === "rule" && <Badge tone="warn">agent rule: always ask</Badge>}
@@ -203,8 +235,36 @@ function EventItem({ ev }: { ev: RunEvent }) {
   }
 }
 
-export function Timeline({ events }: { events: Ev[] }) {
-  const items = buildItems(events);
+/** A run this agent handed a sub-task to, with its own steps nested inside. */
+function DelegateItem({ start, end, items }: { start: Ev; end?: Ev; items: Item[] }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="rounded-lg border border-primary/40 bg-accent/30">
+      <div className="flex flex-wrap items-center gap-2 px-3.5 py-2.5">
+        <Users className="size-4 text-primary" />
+        <span>
+          Handed to <b>{start.agent}</b>
+        </span>
+        <StatusBadge value={end?.status ?? "running"} />
+        {end && <span className="text-xs text-muted-foreground">{end.steps} steps</span>}
+        <Link className="text-xs text-primary hover:underline" to={`/runs/${start.runId}`}>
+          open run
+        </Link>
+        <button className="ml-auto cursor-pointer text-xs text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)}>
+          {open ? "▾ hide steps" : `▸ show ${items.length} steps`}
+        </button>
+      </div>
+      <div className="px-3.5 pb-2 text-sm whitespace-pre-wrap text-muted-foreground">{start.task}</div>
+      {open && items.length > 0 && (
+        <div className="ml-3.5 border-l-2 border-primary/30 py-2 pr-3 pl-3">
+          <Items items={items} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Items({ items }: { items: Item[] }) {
   return (
     <div className="flex flex-col gap-2">
       {items.map((it) =>
@@ -212,10 +272,16 @@ export function Timeline({ events }: { events: Ev[] }) {
           <ToolItem key={it.call._key} call={it.call} result={it.result} />
         ) : it.kind === "approval" ? (
           <ApprovalItem key={it.req._key} req={it.req} resolved={it.resolved} />
+        ) : it.kind === "delegate" ? (
+          <DelegateItem key={it.start._key} start={it.start} end={it.end} items={it.items} />
         ) : (
           <EventItem key={it.ev._key} ev={it.ev} />
         ),
       )}
     </div>
   );
+}
+
+export function Timeline({ events }: { events: Ev[] }) {
+  return <Items items={buildItems(events)} />;
 }

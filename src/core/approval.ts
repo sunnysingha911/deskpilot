@@ -13,7 +13,7 @@ export function cliApprover(opts: { autoApprove?: boolean } = {}): Approver {
     try {
       const why = req.reason === "irreversible" ? "IRREVERSIBLE" : "APPROVAL REQUIRED (agent rule)";
       const answer = await rl.question(
-        `\n⚠️  ${why}: ${req.caller} wants to run ${req.tool}\n${JSON.stringify(req.input, null, 2)}\nApprove? [y/N] `,
+        `\n⚠️  ${why}: ${req.chain && req.chain.length > 1 ? `you → ${req.chain.join(" → ")}` : req.caller} wants to run ${req.tool}\n${JSON.stringify(req.input, null, 2)}\nApprove? [y/N] `,
       );
       return { approved: /^y(es)?$/i.test(answer.trim()), by: "user:prompt" };
     } finally {

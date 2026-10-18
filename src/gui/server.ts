@@ -4,11 +4,11 @@
 // requests must target 127.0.0.1/localhost on our port (blocks DNS rebinding), cross-origin requests
 // are refused, and the page is served under a strict Content-Security-Policy.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join } from "node:path";
-import { AGENTS_DIR, AgentDefinition } from "../agent/definition.ts";
+import { AGENTS_DIR, AgentDefinition, listAgents } from "../agent/definition.ts";
 import { ActionLogger } from "../core/logger.ts";
 import { DATA_DIR, ROOT } from "../core/paths.ts";
 import { getConnection, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
@@ -58,19 +58,6 @@ async function readJson(req: IncomingMessage): Promise<any> {
   }
 }
 
-function listAgents(): AgentDefinition[] {
-  if (!existsSync(AGENTS_DIR)) return [];
-  const out: AgentDefinition[] = [];
-  for (const f of readdirSync(AGENTS_DIR).filter((f) => f.endsWith(".json")).sort()) {
-    try {
-      out.push(AgentDefinition.parse(JSON.parse(readFileSync(join(AGENTS_DIR, f), "utf8"))));
-    } catch {
-      /* skip invalid files; the CLI reports them */
-    }
-  }
-  return out;
-}
-
 function connectionView() {
   const settings = loadSettings();
   return {
@@ -84,6 +71,7 @@ function connectionView() {
       keySet: keyIsSet(c),
       defaultModel: c.defaultModel,
       enabled: c.enabled,
+      contextLength: c.contextLength ?? null,
     })),
   };
 }
@@ -156,6 +144,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       if (typeof body.defaultModel === "string") patch.defaultModel = body.defaultModel.trim();
       if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
       if (typeof body.baseUrl === "string" && body.baseUrl.trim()) patch.baseUrl = body.baseUrl.trim();
+      if (typeof body.contextLength === "number") patch.contextLength = Math.round(body.contextLength);
       const next = Settings.safeParse({ ...cur, connections: { ...cur.connections, [m[1]!]: { ...cur.connections[m[1]!], ...patch } } });
       if (!next.success) throw new HttpError(400, next.error.issues.map((i) => i.message).join("; "));
       saveSettings(next.data);
@@ -191,6 +180,8 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
           task: b.task.trim(),
           connection: typeof b.connection === "string" && b.connection ? b.connection : undefined,
           model: typeof b.model === "string" && b.model.trim() ? b.model.trim() : undefined,
+          with: Array.isArray(b.with) ? b.with.filter((n: unknown): n is string => typeof n === "string" && NAME_RE.test(n)) : undefined,
+          fromRun: typeof b.fromRun === "string" && /^[\w-]+$/.test(b.fromRun) ? b.fromRun : undefined,
         });
       } catch (err) {
         const status = (err as { status?: number }).status ?? 400;
@@ -203,6 +194,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       const { transcript_json: _t, ...rest } = run;
       return {
         run: rest,
+        children: logger.childRuns(m[1]!),
         active: runs.isActive(m[1]!),
         pendingApprovals: runs.pendingApprovals(m[1]!),
         actions: logger.queryActions({ sessionId: m[1]!, limit: 1000 }).reverse(),

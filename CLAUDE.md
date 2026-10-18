@@ -48,8 +48,9 @@ browser, use keyboard and mouse. Later, an orchestrator agent delegates tasks to
 src/core/        tool definition, executor (validate → classify → approve → run → log), logger, risk
 src/tools/       one file per tool family; index.ts = registry filtered by OS
 src/platform/    DesktopBackend interface (types.ts) + per-OS backends (macos.ts)
-src/llm/         ModelProvider interface (types.ts) + adapters (anthropic.ts, openai-compatible.ts)
-src/agent/       agent definition schema, system prompt + untrusted framing, the run loop
+src/llm/         ModelProvider interface (types.ts) + adapters (anthropic.ts, openai-compatible.ts, ollama.ts)
+src/agent/       agent definition schema, system prompt + untrusted framing, the run loop,
+                 delegate.ts (agent-to-agent hand-offs)
 agents/          agent definitions as JSON (data, not code)
 src/gui/         control panel backend: server.ts (localhost API + SSE, serves ui/dist), runs.ts
                  (run manager, GUI approvals, provider fallback)
@@ -78,6 +79,7 @@ data/            SQLite DBs (gitignored)
   step/token budgets.
 - **Phase 3 — Windows backend, then Linux backend** (tested on user-provided VM/machine).
 - **Phase 4+ — Multiple agents and orchestrator**, memory, specialist definitions.
+  Started: agent-to-agent delegation (`agent.delegate`), @mentions, GUI picks and hand-offs.
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
@@ -93,6 +95,26 @@ data/            SQLite DBs (gitignored)
   (beta `server-side-fallback-2026-07-01`), tool names mapped `.`→`__`. No forced tool_choice.
 - OpenAI-compatible: Chat Completions via fetch. On OpenAI gpt-5.5, Chat Completions rejects tools +
   `reasoning_effort`, so OpenAI agent files omit `effort` (a Responses-API adapter would lift this).
+- Ollama: native `/api/chat` (not `/v1`) so every request sets `options.num_ctx` (default 32768,
+  per-connection setting). Keep num_ctx stable: changing it reloads the model. A prompt ≥97% of
+  num_ctx stops the run (Ollama would silently drop the oldest tokens, i.e. the system prompt).
+  `prompt_eval_count` includes cached tokens; input = prompt_eval_count − prompt_eval_cached_count.
+  effort → `think` (low = off). Only tool-capable models are offered. `/api/ps` reports
+  context_length 4096 under the MLX runner even when the larger num_ctx is honored (verified).
+
+## Delegation invariants
+- `agent.delegate` exists only for a run whose agent may call someone: `canDelegateTo`, plus user picks
+  (@mentions, GUI `with`) for the top-level agent only. Targets exclude self and agents already in the
+  chain; depth ≤ `MAX_DELEGATION_DEPTH` (2). The input schema is an enum of the allowed targets.
+- The called agent runs as a nested `runAgent` with its own tools/model, the same base executor (so the
+  same approver and log), the parent's abort signal, and a budget capped by what the caller has left.
+  Its output tokens count against the caller's budget (`totalOutputTokens`).
+- Its first message is framed as a delegated task (written by an agent, not the user); its answer goes
+  back as untrusted data. Hand-offs (`fromRun`) pass the earlier answer as `<untrusted_data>`.
+- `runs.parent_run_id` + `relation` ("delegate" | "handoff") link runs. Nested events are persisted
+  under the child run and forwarded to the parent as `{type:"sub", runId, agent, depth, event}`.
+- Approvals carry `chain`; in the GUI they surface on the top-level run (with `subRunId`).
+- Desktop actions never run in parallel: delegation is synchronous inside the one active run.
 
 ## GUI invariants
 - Server binds 127.0.0.1 only; every /api call needs the per-launch token (header, or `?t=` for SSE);

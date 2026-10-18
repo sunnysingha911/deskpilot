@@ -1,14 +1,17 @@
 import { AnthropicProvider } from "./anthropic.ts";
+import { OllamaProvider } from "./ollama.ts";
 import { OPENAI_BASE_URL, OpenAICompatibleProvider } from "./openai-compatible.ts";
 import type { ModelProvider } from "./types.ts";
 
 export interface ModelSpec {
-  provider: "anthropic" | "openai-compatible";
+  provider: "anthropic" | "openai-compatible" | "ollama";
   id: string;
   /** openai-compatible only: API root, e.g. https://api.x.ai/v1 or http://localhost:11434/v1. Default: OpenAI. */
   baseUrl?: string | undefined;
   /** Name of the env var holding the API key (the key itself never lives in agent files). */
   apiKeyEnv?: string | undefined;
+  /** ollama only: context window (num_ctx). */
+  contextLength?: number | undefined;
 }
 
 export function createProvider(spec: ModelSpec): ModelProvider {
@@ -24,5 +27,7 @@ export function createProvider(spec: ModelSpec): ModelProvider {
       if (baseUrl === OPENAI_BASE_URL && !key) throw new Error("OPENAI_API_KEY is not set (add it to .env)");
       return new OpenAICompatibleProvider({ baseUrl, apiKey: key });
     }
+    case "ollama":
+      return new OllamaProvider({ baseUrl: spec.baseUrl, contextLength: spec.contextLength });
   }
 }
