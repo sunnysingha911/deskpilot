@@ -5,7 +5,7 @@ import type { Risk } from "./risk.ts";
 
 export type ActionStatus = "ok" | "error" | "blocked";
 
-export type RunStatus = "completed" | "refused" | "max_tokens" | "budget_exhausted" | "error";
+export type RunStatus = "completed" | "refused" | "max_tokens" | "budget_exhausted" | "stopped" | "error";
 
 export interface RunSummary {
   status: RunStatus;
@@ -95,6 +95,14 @@ export class ActionLogger {
         error              TEXT,
         transcript_json    TEXT
       );
+      CREATE TABLE IF NOT EXISTS run_events (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id    TEXT NOT NULL,
+        ts        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        type      TEXT NOT NULL,
+        data_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS run_events_run ON run_events(run_id, id);
     `);
     this.insertStmt = this.db.prepare(`
       INSERT INTO actions (os, session_id, caller, tool, risk, status, approved_by, input_json, output_json, error, duration_ms)
@@ -144,6 +152,41 @@ export class ActionLogger {
         serialize(f.transcript, 2 * 1024 * 1024),
         id,
       );
+  }
+
+  logRunEvent(runId: string, event: { type: string }): number {
+    const res = this.db
+      .prepare(`INSERT INTO run_events (run_id, type, data_json) VALUES (?, ?, ?)`)
+      .run(runId, event.type, serialize(event, 64 * 1024));
+    return Number(res.lastInsertRowid);
+  }
+
+  runEvents(runId: string, afterId = 0): Array<{ id: number; ts: string; type: string; data_json: string }> {
+    return this.db
+      .prepare(`SELECT id, ts, type, data_json FROM run_events WHERE run_id = ? AND id > ? ORDER BY id`)
+      .all(runId, afterId) as unknown as Array<{ id: number; ts: string; type: string; data_json: string }>;
+  }
+
+  listRuns(limit = 100): Record<string, unknown>[] {
+    return this.db
+      .prepare(
+        `SELECT id, started_at, ended_at, agent, provider, model, task, status, steps, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, final_text, error FROM runs ORDER BY started_at DESC LIMIT ?`,
+      )
+      .all(limit) as Record<string, unknown>[];
+  }
+
+  queryActions(f: { tool?: string; risk?: string; status?: string; sessionId?: string; limit?: number }): ActionRow[] {
+    const where: string[] = [];
+    const args: Array<string | number> = [];
+    if (f.tool) (where.push("tool = ?"), args.push(f.tool));
+    if (f.risk) (where.push("risk = ?"), args.push(f.risk));
+    if (f.status) (where.push("status = ?"), args.push(f.status));
+    if (f.sessionId) (where.push("session_id = ?"), args.push(f.sessionId));
+    args.push(Math.min(f.limit ?? 200, 1000));
+    return this.db
+      .prepare(`SELECT * FROM actions ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ?`)
+      .all(...args) as unknown as ActionRow[];
   }
 
   getRun(id: string): Record<string, unknown> | undefined {

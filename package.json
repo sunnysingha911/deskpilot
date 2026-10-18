@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "notes-demo": "tsx scripts/notes-demo.ts",
     "input-demo": "tsx scripts/input-demo.ts",
-    "agent": "tsx scripts/agent.ts"
+    "agent": "tsx scripts/agent.ts",
+    "gui": "tsx scripts/gui.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -12,7 +12,7 @@ export type RunEvent =
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
   | { type: "tool_call"; name: string; input: unknown }
-  | { type: "tool_result"; name: string; status: string; risk: string; summary: string }
+  | { type: "tool_result"; name: string; status: string; risk: string; summary: string; logId?: number }
   | { type: "turn"; step: number; usage: Usage; servedBy: string }
   | { type: "end"; summary: RunSummary };
 
@@ -20,16 +20,29 @@ export interface RunDeps {
   provider: ModelProvider;
   executor: Executor;
   logger: ActionLogger;
-  onEvent?: (e: RunEvent) => void;
+  /** eventId is the persisted run_events row id (for resumable streams). */
+  onEvent?: (e: RunEvent, eventId: number) => void;
+  /** Abort between steps (pending approvals should be denied by the caller). */
+  signal?: AbortSignal;
+  /** Use this run id instead of generating one (lets a caller subscribe before the run starts). */
+  runId?: string;
 }
 
 export interface RunResult extends RunSummary {
   runId: string;
 }
 
+export function newRunId(): string {
+  return `run-${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
+}
+
 export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps): Promise<RunResult> {
-  const runId = `run-${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
-  const emit = deps.onEvent ?? (() => {});
+  const runId = deps.runId ?? newRunId();
+  // Every event is persisted, so a run's workflow can be replayed from history.
+  const emit = (e: RunEvent) => {
+    const id = deps.logger.logRunEvent(runId, e);
+    deps.onEvent?.(e, id);
+  };
   const tools = resolveTools(def, deps.executor.list());
   const allowed = new Set(tools.map((t) => t.name));
 
@@ -57,6 +70,11 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
 
   try {
     while (true) {
+      if (deps.signal?.aborted) {
+        status = "stopped";
+        error = "stopped by user";
+        break;
+      }
       if (steps >= def.budget.maxSteps) {
         error = `step budget (${def.budget.maxSteps}) exhausted`;
         break;
@@ -136,6 +154,7 @@ export async function runAgent(def: AgentDefinition, task: string, deps: RunDeps
           status: r.status,
           risk: r.risk,
           summary: r.ok ? `${r.durationMs}ms` : (r.error?.message ?? r.status),
+          logId: r.logId,
         });
       }
       input = { kind: "tool_results", results };

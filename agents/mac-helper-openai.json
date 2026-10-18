@@ -11,8 +11,10 @@
   ],
   "model": {
     "provider": "openai-compatible",
+    "connection": "openai",
     "id": "gpt-5.5",
-    "apiKeyEnv": "OPENAI_API_KEY"
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "effort": "medium"
   },
   "budget": {
     "maxSteps": 20,

@@ -16,6 +16,8 @@ export const AgentDefinition = z
     model: z
       .object({
         provider: z.enum(["anthropic", "openai-compatible"]),
+        /** Named connection from the provider registry (e.g. "openai", "xai"); fills baseUrl/apiKeyEnv. */
+        connection: z.string().regex(/^[a-z0-9-]+$/).optional(),
         id: z.string().min(1),
         baseUrl: z.string().url().optional(),
         apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/).optional(),

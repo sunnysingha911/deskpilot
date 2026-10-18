@@ -42,6 +42,17 @@ Grant permissions to your terminal app as described in [docs/permissions.md](doc
 (Accessibility, Automation; Screen Recording only for screenshots). The browser tools drive an
 installed Chromium-family browser (Brave/Chrome) with an isolated profile in `data/`.
 
+## Control panel
+
+```sh
+npm run gui
+```
+
+Opens a desktop-style window (your installed Brave/Chrome in app mode) where you can create and edit
+agents, connect Claude / OpenAI / Grok / Gemini / Ollama, run tasks and watch each step live, approve
+or deny irreversible actions, and browse past runs and the full action log. The server listens on
+127.0.0.1 only and every API call needs a per-launch token.
+
 ## Usage
 
 ```sh

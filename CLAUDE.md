@@ -51,6 +51,9 @@ src/platform/    DesktopBackend interface (types.ts) + per-OS backends (macos.ts
 src/llm/         ModelProvider interface (types.ts) + adapters (anthropic.ts, openai-compatible.ts)
 src/agent/       agent definition schema, system prompt + untrusted framing, the run loop
 agents/          agent definitions as JSON (data, not code)
+src/gui/         control panel: server.ts (localhost API + SSE), runs.ts (run manager, GUI approvals,
+                 provider fallback), public/ (plain HTML/CSS/JS UI, no build step)
+src/llm/connections.ts  named provider connections, data/settings.json, write-only key storage in .env
 native/axhelper/ Swift package for AX API
 scripts/         hand-run CLIs / smoke checks
 docs/            permissions.md and other docs
@@ -74,7 +77,7 @@ data/            SQLite DBs (gitignored)
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
-- `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
+- `npm run gui` (control panel window) · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
 - `npm run logs -- [n]`, `npm test`, `npm run typecheck`, `npm run build:native`, `npm run notes-demo`
 
 ## Agent loop invariants
@@ -86,6 +89,15 @@ data/            SQLite DBs (gitignored)
   (beta `server-side-fallback-2026-07-01`), tool names mapped `.`→`__`. No forced tool_choice.
 - OpenAI-compatible: Chat Completions via fetch. On OpenAI gpt-5.5, Chat Completions rejects tools +
   `reasoning_effort`, so OpenAI agent files omit `effort` (a Responses-API adapter would lift this).
+
+## GUI invariants
+- Server binds 127.0.0.1 only; every /api call needs the per-launch token (header, or `?t=` for SSE);
+  Host must be 127.0.0.1/localhost:<port>; foreign Origin refused; strict CSP (no inline script/style).
+- UI renders all dynamic content via textContent (run output is untrusted); never innerHTML.
+- API keys are write-only: the API reports keySet booleans and never returns key values.
+- One active run at a time. Provider fallback only when a run fails before its first step
+  (so no tool has run) and only when the user didn't pick a provider explicitly.
+- Every run event is persisted in `run_events`, so history replays the same timeline as live view.
 
 ## Working rules
 - Never commit unless the user asks.

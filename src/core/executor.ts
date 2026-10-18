@@ -10,6 +10,8 @@ export interface ApprovalRequest {
   risk: Risk;
   input: unknown;
   caller: string;
+  /** Run / session the call belongs to. */
+  sessionId: string;
   /** Why approval is needed: the action is irreversible, or an agent rule requires it. */
   reason: "irreversible" | "rule";
 }
@@ -127,7 +129,7 @@ export class Executor {
     let approvedBy: string | undefined;
     if (risk === "irreversible" || opts.forceApproval) {
       const reason = risk === "irreversible" ? "irreversible" : "rule";
-      const decision = await this.approver({ tool: name, risk, input: logInput, caller: fullCtx.caller, reason });
+      const decision = await this.approver({ tool: name, risk, input: logInput, caller: fullCtx.caller, sessionId: fullCtx.sessionId, reason });
       if (!decision.approved) {
         const what = reason === "irreversible" ? "is irreversible" : "requires approval for this agent";
         return finish("blocked", risk, logInput, {

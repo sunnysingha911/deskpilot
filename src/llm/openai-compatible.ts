@@ -116,7 +116,8 @@ class OpenAICompatibleSession implements ModelSession {
       ...(this.tools.length && { tools: this.tools, tool_choice: "auto", parallel_tool_calls: true }),
       // OpenAI's reasoning models only accept max_completion_tokens; most other servers use max_tokens.
       ...(this.isOpenAI() ? { max_completion_tokens: this.opts.maxTokensPerTurn } : { max_tokens: this.opts.maxTokensPerTurn }),
-      ...(effort && { reasoning_effort: effort }),
+      // OpenAI's Chat Completions rejects reasoning_effort together with tools (gpt-5.5), so only send it elsewhere.
+      ...(effort && !(this.isOpenAI() && this.tools.length) && { reasoning_effort: effort }),
     });
 
     const choice = res.choices[0];
