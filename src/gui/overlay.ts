@@ -19,7 +19,8 @@ export interface Overlay {
  * Start the overlay for a running control panel. `panelUrl` is the tokened URL (…/?t=…); the token
  * goes to the helper over stdin, never on its command line.
  */
-export function startOverlay(panelUrl: string, onOpenRun: (runId: string) => void): Overlay | { error: string } {
+/** `onOpen` gets the control-panel route to show: "#/runs/<id>" or "#/arsenal". */
+export function startOverlay(panelUrl: string, onOpen: (route: string) => void): Overlay | { error: string } {
   if (process.platform !== "darwin") return { error: "the desktop overlay is macOS-only for now" };
   if (!existsSync(OVERLAY_PATH)) return { error: "overlay helper isn't built. Run: npm run build:native" };
 
@@ -40,7 +41,8 @@ export function startOverlay(panelUrl: string, onOpenRun: (runId: string) => voi
     } catch {
       return;
     }
-    if (msg.event === "open" && typeof msg.runId === "string" && /^[\w-]{1,80}$/.test(msg.runId)) onOpenRun(msg.runId);
+    if (msg.event === "open" && typeof msg.runId === "string" && /^[\w-]{1,80}$/.test(msg.runId)) onOpen(`#/runs/${msg.runId}`);
+    if (msg.event === "openArsenal") onOpen("#/arsenal");
     if (msg.event === "moved") {
       const p = Position.safeParse(msg);
       if (p.success) {

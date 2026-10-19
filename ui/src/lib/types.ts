@@ -102,6 +102,8 @@ export interface RunDetail {
   run: RunRow;
   attachments: AttachedFile[];
   pendingQuestions?: Array<{ id: string; agent: string; question: string; choices?: string[] }>;
+  /** 👍 1 / 👎 -1, from A.R.S.E.N.A.L. */
+  rating?: 1 | -1 | null;
   children: ChildRun[];
   active: boolean;
   actions: ActionRow[];
@@ -129,6 +131,9 @@ export interface PresenceAvatar {
   pending?: { kind: "approval"; id: string; tool: string } | { kind: "question"; id: string; choices: number };
   /** The user's own task text (top-level agents only). */
   task?: string;
+  /** "orb": A.R.S.E.N.A.L itself, drawn as a sphere in `color`. */
+  kind?: "orb";
+  color?: string;
   startedAt: number;
   steps: number;
   outputTokens: number;
@@ -136,4 +141,60 @@ export interface PresenceAvatar {
 export interface PresenceState {
   avatars: PresenceAvatar[];
   hideForInput: boolean;
+}
+
+// ── A.R.S.E.N.A.L ──
+export interface ArsenalDecision {
+  agent: string;
+  connection?: string;
+  model?: string;
+  mode: RunMode;
+  priority: Priority;
+  confidence: number;
+  why: string[];
+  alternatives: Array<{ agent: string; score: number }>;
+  similar: number;
+  explored: boolean;
+}
+export interface ArsenalSuggestion {
+  id: number;
+  createdAt: string;
+  kind: "budget" | "model" | "health";
+  target: string;
+  title: string;
+  rationale: string;
+  patch: Record<string, unknown> | null;
+  status: "open" | "applied" | "rejected" | "reverted" | "kept";
+  trial: { baseline: number; rewards: number[]; changeId: number } | null;
+}
+export interface ArsenalChange {
+  id: number;
+  ts: string;
+  target: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  by: string;
+  suggestionId: number | null;
+  undone: boolean;
+}
+export interface ArsenalSettings {
+  color: string;
+  memory: "routed" | "all" | "off";
+  exploration: number;
+  /** Always show its orb on the desktop. */
+  desktop: boolean;
+}
+export interface ArsenalReport {
+  name: string;
+  expansion: string;
+  settings: ArsenalSettings;
+  experiences: number;
+  routed: number;
+  rated: number;
+  avgReward: number | null;
+  lastLearned: string | null;
+  agents: Array<{ agent: string; runs: number; successRate: number | null; avgReward: number | null; avgOutputTokens: number | null; rated: number; knownFor: string[]; model: string }>;
+  providers: Array<{ provider: string; runs: number; avgReward: number; avgOutputTokens: number }>;
+  suggestions: ArsenalSuggestion[];
+  changes: ArsenalChange[];
 }

@@ -6,11 +6,12 @@
 // clicking opens a bubble to reply, answer a question, approve (press and hold) or deny, change
 // priority, stop, or open the run. Speech bubbles only ever show our own status wording; an agent's
 // question (model output) appears in the click bubble, labelled as written by the AI, as plain text.
-import { useEffect, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { Avatar } from "@/components/Avatar";
+import { Orb } from "@/components/Orb";
 import { api, get, presenceUrl } from "@/lib/api";
 import { playDust } from "@/lib/dust";
-import type { PresenceAvatar, PresenceState, Priority, RunDetail } from "@/lib/types";
+import type { ArsenalDecision, PresenceAvatar, PresenceState, Priority, RunDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** Dust effect length; a bit shorter than the core's dissolveMs, so it ends before the avatar is removed. */
@@ -26,6 +27,17 @@ function host(msg: Record<string, unknown>): void {
 }
 
 type Reaction = "poke" | "cheer" | "nod" | null;
+
+/** Presence moods → the orb's expressions. */
+const ORB_STATE: Partial<Record<PresenceAvatar["mood"], "idle" | "thinking" | "talking" | "working" | "happy" | "worried">> = {
+  talking: "talking",
+  thinking: "thinking",
+  working: "working",
+  happy: "happy",
+  frustrated: "worried",
+  sad: "worried",
+  worried: "worried",
+};
 
 function elapsed(since: number): string {
   const s = Math.max(0, Math.round((Date.now() - since) / 1000));
@@ -66,7 +78,24 @@ function HoldToApprove({ onApprove }: { onApprove: (heldMs: number) => void }) {
 }
 
 /** Reply or answer box. While it's open the overlay has the keyboard and the core holds the desktop. */
-function ReplyBox({ placeholder, onSend, onClose }: { placeholder: string; onSend: (text: string) => Promise<void>; onClose: () => void }) {
+function ReplyBox({
+  placeholder,
+  onSend,
+  onClose,
+  onText,
+  sendLabel = "Send",
+  closeOnSend = true,
+  children,
+}: {
+  placeholder: string;
+  onSend: (text: string) => Promise<void>;
+  onClose: () => void;
+  onText?: (text: string) => void;
+  sendLabel?: string;
+  /** false: the parent swaps the box out itself after sending. */
+  closeOnSend?: boolean;
+  children?: ReactNode;
+}) {
   const input = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [ready, setReady] = useState(false);
@@ -98,7 +127,7 @@ function ReplyBox({ placeholder, onSend, onClose }: { placeholder: string; onSen
     setBusy(true);
     try {
       await onSend(text.trim());
-      onClose();
+      if (closeOnSend) onClose();
     } finally {
       setBusy(false);
     }
@@ -111,7 +140,10 @@ function ReplyBox({ placeholder, onSend, onClose }: { placeholder: string; onSen
         disabled={!ready || busy}
         placeholder={ready ? placeholder : "one moment…"}
         rows={2}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          onText?.(e.target.value);
+        }}
         onPointerDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Escape") onClose();
@@ -121,14 +153,85 @@ function ReplyBox({ placeholder, onSend, onClose }: { placeholder: string; onSen
           }
         }}
       />
+      {children}
       <div className="ov-row">
         <button type="button" className="ov-btn" onClick={onClose} onPointerDown={(e) => e.stopPropagation()}>
           Cancel
         </button>
         <button type="button" className="ov-btn ov-primary" disabled={!text.trim() || busy} onClick={() => void send()} onPointerDown={(e) => e.stopPropagation()}>
-          Send
+          {sendLabel}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** A.R.S.E.N.A.L's bubble: give it a task (it shows who it would send, live), or open its page. */
+function ArsenalBubble({ a, align, onClose, react }: { a: PresenceAvatar; align: "left" | "right"; onClose: () => void; react: (r: Reaction) => void }) {
+  const [asking, setAsking] = useState(true);
+  const [task, setTask] = useState("");
+  const [preview, setPreview] = useState<ArsenalDecision | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (task.trim().length < 4) return setPreview(null);
+    const t = setTimeout(() => {
+      api<ArsenalDecision>("POST", "/api/arsenal/decide", { task })
+        .then(setPreview)
+        .catch(() => setPreview(null));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [task]);
+  const stop = (e: PointerEvent) => e.stopPropagation();
+  return (
+    <div className={cn("ov-menu ov-arsenal", align === "right" ? "ov-menu-right" : "ov-menu-left")} data-hit onPointerDown={stop} onPointerUp={stop}>
+      <div className="ov-menu-head">
+        <b>A.R.S.E.N.A.L</b>
+        <span>{a.status}</span>
+      </div>
+      {sent ? (
+        <div className="ov-note">Sent {sent}. It runs alongside your other tasks; I'll learn from how it goes.</div>
+      ) : asking ? (
+        <>
+          <div className="ov-label">What should I do?</div>
+          <ReplyBox
+            placeholder="Describe a task… (Enter to start, Esc to close)"
+            sendLabel="Start"
+            closeOnSend={false}
+            onText={setTask}
+            onClose={() => {
+              setAsking(false);
+              onClose();
+            }}
+            onSend={async (text) => {
+              setError(null);
+              try {
+                const r = await api<{ runId: string; decision?: ArsenalDecision }>("POST", "/api/runs", { agent: "arsenal", task: text });
+                setSent(r.decision?.agent ?? "it");
+                react("cheer");
+                setTimeout(onClose, 2500);
+              } catch (e) {
+                setError((e as Error).message);
+                throw e;
+              }
+            }}
+          >
+            {preview && (
+              <div className="ov-preview">
+                → <b>{preview.agent}</b>
+                {preview.connection ? ` on ${preview.connection}` : ""} · {preview.mode} · {Math.round(preview.confidence * 100)}% sure
+                <div className="ov-preview-why">{preview.why[0]}</div>
+              </div>
+            )}
+          </ReplyBox>
+        </>
+      ) : null}
+      <div className="ov-row">
+        <button type="button" className="ov-btn" onClick={() => host({ type: "openArsenal" })}>
+          Open A.R.S.E.N.A.L
+        </button>
+      </div>
+      {error && <div className="ov-error">{error}</div>}
     </div>
   );
 }
@@ -339,7 +442,10 @@ function Slot({ a, open, onToggle }: { a: PresenceAvatar; open: boolean; onToggl
     host({ type: "dragEnd" });
     if (d && d.moved <= 4) {
       react("poke");
-      onToggle();
+      // The permanent orb opens its "what should I do?" bubble; a brief routing orb opens its task.
+      if (a.kind === "orb" && a.key !== "arsenal") {
+        if (a.rootRunId) host({ type: "open", runId: a.rootRunId });
+      } else onToggle();
     }
   };
 
@@ -361,20 +467,22 @@ function Slot({ a, open, onToggle }: { a: PresenceAvatar; open: boolean; onToggl
         setGaze(0);
       }}
     >
-      {open && solid && <ActionBubble a={a} align={align} onClose={onToggle} react={react} />}
+      {open && solid && (a.key === "arsenal" ? <ArsenalBubble a={a} align={align} onClose={onToggle} react={react} /> : <ActionBubble a={a} align={align} onClose={onToggle} react={react} />)}
       {hover && !open && solid && (
         <div className={cn("ov-card", align === "right" ? "ov-menu-right" : "ov-menu-left")}>
           <b>{a.agent}</b>
           {a.task && <div className="ov-card-task">{a.task}</div>}
-          <div className="ov-card-meta">
-            {a.status} · {elapsed(a.startedAt)} · step {a.steps} · {a.outputTokens.toLocaleString()} tokens out
-          </div>
-          <div className="ov-card-hint">click for actions · drag to move</div>
+          <div className="ov-card-meta">{a.kind === "orb" ? a.status : `${a.status} · ${elapsed(a.startedAt)} · step ${a.steps} · ${a.outputTokens.toLocaleString()} tokens out`}</div>
+          <div className="ov-card-hint">{a.key === "arsenal" ? "click to give me a task · drag to move" : a.kind === "orb" ? "click to open the task · drag to move" : "click for actions · drag to move"}</div>
         </div>
       )}
       <div className="ov-bubble">{a.status}</div>
       <div className="ov-figure">
-        <Avatar svgRef={svg} look={a.look} mood={a.mood} size={120} gaze={hover ? gaze : 0} title={`${a.agent}, ${a.mood}`} />
+        {a.kind === "orb" ? (
+          <Orb svgRef={svg} color={a.color} state={ORB_STATE[a.mood] ?? "idle"} size={120} interactive title={`${a.agent}: ${a.status}`} />
+        ) : (
+          <Avatar svgRef={svg} look={a.look} mood={a.mood} size={120} gaze={hover ? gaze : 0} title={`${a.agent}, ${a.mood}`} />
+        )}
         <canvas ref={canvas} className="ov-dust" aria-hidden />
       </div>
       <div className="ov-name">{a.agent}</div>

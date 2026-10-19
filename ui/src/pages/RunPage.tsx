@@ -5,7 +5,10 @@ import { Link, useSearchParams } from "react-router";
 import { parseMentions } from "../../../src/agent/schema.ts";
 import { AttachmentPicker, NO_ATTACHMENTS, type AttachmentState } from "@/components/Attachments";
 import { ChatBox } from "@/components/ChatBox";
-import { PageHeader, useMeta } from "@/components/Layout";
+import { Rating } from "@/components/Rating";
+import { PageHeader, useArsenal, useMeta } from "@/components/Layout";
+import { Orb } from "@/components/Orb";
+import { DecisionView } from "@/pages/ArsenalPage";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
 import { Button } from "@/components/ui/button";
@@ -16,7 +19,7 @@ import { Input, NativeSelect, Textarea } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { useRunEvents } from "@/hooks/useRunEvents";
 import { api, get } from "@/lib/api";
-import type { ActiveRun, AgentDefinition, Priority, ProvidersView, RunDetail, RunMode } from "@/lib/types";
+import type { ActiveRun, AgentDefinition, ArsenalDecision, Priority, ProvidersView, RunDetail, RunMode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { modelCache } from "@/pages/ProvidersPage";
 
@@ -30,7 +33,12 @@ export function RunPage() {
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => get<AgentDefinition[]>("/api/agents") });
   const prov = useQuery({ queryKey: ["providers"], queryFn: () => get<ProvidersView>("/api/providers") });
 
-  const [agent, setAgent] = useState(() => localStorage.getItem("deskpilot-last-agent") ?? "");
+  // "arsenal" = let A.R.S.E.N.A.L pick the agent, provider and run settings (the default for new users).
+  const [agent, setAgent] = useState(() => localStorage.getItem("deskpilot-last-agent") ?? "arsenal");
+  const isArsenal = agent === "arsenal";
+  const arsenal = useArsenal();
+  const orbColor = arsenal.data?.settings.color ?? "#ff8a1f";
+  const [preview, setPreview] = useState<ArsenalDecision | null>(null);
   const [connection, setConnection] = useState("");
   const [model, setModel] = useState("");
   const [task, setTask] = useState("");
@@ -56,29 +64,43 @@ export function RunPage() {
   const activeRuns = meta.data?.activeRuns ?? [];
 
   const list = agents.data ?? [];
-  const selected = list.find((a) => a.name === agent) ?? list[0];
+  const selected = isArsenal ? undefined : (list.find((a) => a.name === agent) ?? list[0]);
+
+  // What A.R.S.E.N.A.L would do with the task being typed.
+  useEffect(() => {
+    if (!isArsenal || task.trim().length < 4) return setPreview(null);
+    const t = setTimeout(() => {
+      api<ArsenalDecision>("POST", "/api/arsenal/decide", { task })
+        .then(setPreview)
+        .catch(() => setPreview(null));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [isArsenal, task]);
   const stream = useRunEvents(runId);
 
   const start = useMutation({
     mutationFn: () =>
-      api<{ runId: string }>("POST", "/api/runs", {
-        agent: selected!.name,
+      api<{ runId: string; decision?: ArsenalDecision }>("POST", "/api/runs", {
+        agent: isArsenal ? "arsenal" : selected!.name,
         task,
         connection: connection || undefined,
         model: model || undefined,
-        with: withAgents.filter((n) => n !== selected!.name && list.some((a) => a.name === n)),
+        with: isArsenal ? undefined : withAgents.filter((n) => n !== selected!.name && list.some((a) => a.name === n)),
         fromRun: fromRun || undefined,
         attachments: attachments.files.length ? attachments.set : undefined,
-        mode,
-        priority,
+        // A.R.S.E.N.A.L picks these itself.
+        mode: isArsenal ? undefined : mode,
+        priority: isArsenal ? undefined : priority,
       }),
-    onSuccess: ({ runId }) => {
-      localStorage.setItem("deskpilot-last-agent", selected!.name);
+    onSuccess: ({ runId, decision }) => {
+      const who = decision?.agent ?? selected!.name;
+      localStorage.setItem("deskpilot-last-agent", isArsenal ? "arsenal" : who);
       setRunId(runId);
-      setWatchAgent(selected!.name);
+      setWatchAgent(who);
       // The form is ready for the next task straight away (the files now belong to that run).
       clearForm();
-      toast(`Started ${selected!.name}. You can start another task now: it runs alongside.`);
+      setPreview(null);
+      toast(decision ? `A.R.S.E.N.A.L sent ${who}. You can start another task now.` : `Started ${who}. You can start another task now: it runs alongside.`);
       qc.invalidateQueries({ queryKey: ["meta"] });
     },
     onError: (e) => toast((e as Error).message, true),
@@ -144,7 +166,8 @@ export function RunPage() {
       <Card>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <Field label="Agent">
-            <NativeSelect value={selected?.name} onChange={(e) => setAgent(e.target.value)}>
+            <NativeSelect value={isArsenal ? "arsenal" : selected?.name} onChange={(e) => setAgent(e.target.value)}>
+              <option value="arsenal">✦ A.R.S.E.N.A.L: let it decide</option>
               {list.map((a) => (
                 <option key={a.name} value={a.name}>
                   {a.name}
@@ -154,7 +177,7 @@ export function RunPage() {
           </Field>
           <Field label="AI provider">
             <NativeSelect value={connection} onChange={(e) => setConnection(e.target.value)}>
-              <option value="">Agent default ({selected ? `${ownConnection(selected)} · ${selected.model.id}` : "…"})</option>
+              <option value="">{isArsenal ? "Let A.R.S.E.N.A.L choose" : `Agent default (${selected ? `${ownConnection(selected)} · ${selected.model.id}` : "…"})`}</option>
               {prov.data?.connections
                 .filter((c) => c.enabled)
                 .map((c) => (
@@ -179,6 +202,18 @@ export function RunPage() {
           <p className="mt-2 text-xs text-muted-foreground">
             {selected.description || "—"} · tools: {selected.tools.join(", ")}
           </p>
+        )}
+        {isArsenal && (
+          <div className="mt-3 flex items-start gap-3 rounded-md border bg-muted/40 p-3">
+            <Orb color={orbColor} state={preview ? "talking" : "idle"} size={48} className="-my-2 shrink-0" interactive onActivate={() => taskBox.current?.focus()} title="A.R.S.E.N.A.L: tap to type a task" />
+            <div className="min-w-0 flex-1 text-sm">
+              {preview ? (
+                <DecisionView d={preview} color={orbColor} compact />
+              ) : (
+                <p className="text-muted-foreground">Describe the task: A.R.S.E.N.A.L picks the agent, the AI and how it runs, learning from every task.</p>
+              )}
+            </div>
+          </div>
         )}
         {fromRun && (
           <div className="mt-4 flex items-start gap-2 rounded-md border border-primary/40 bg-accent/40 p-3 text-sm">
@@ -208,7 +243,7 @@ export function RunPage() {
             />
           </AttachmentPicker>
         </Field>
-        {others.length > 0 && selected && (
+        {others.length > 0 && selected && !isArsenal && (
           <div className="mt-3">
             <div className="text-xs font-medium text-muted-foreground">Agents it may hand work to in this run</div>
             <div className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1.5">
@@ -236,21 +271,27 @@ export function RunPage() {
           <Button onClick={submit} disabled={start.isPending}>
             <Play /> {activeRuns.length ? "Start another task" : "Start task"}
           </Button>
-          <ModeSwitch
-            value={mode}
-            onChange={(m) => {
-              setMode(m);
-              localStorage.setItem("deskpilot-run-mode", m);
-            }}
-          />
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title={mode === "parallel" ? "Priority only matters in Optimized mode" : "Who gets the screen, keyboard and mouse first"}>
-            Priority
-            <NativeSelect value={priority} onChange={(e) => setPriority(e.target.value as Priority)} className="h-8 w-28 text-xs" disabled={mode === "parallel"}>
-              <option value="high">High</option>
-              <option value="normal">Normal</option>
-              <option value="low">Low</option>
-            </NativeSelect>
-          </label>
+          {isArsenal ? (
+            <span className="text-xs text-muted-foreground">Mode and priority: chosen by A.R.S.E.N.A.L</span>
+          ) : (
+            <>
+              <ModeSwitch
+                value={mode}
+                onChange={(m) => {
+                  setMode(m);
+                  localStorage.setItem("deskpilot-run-mode", m);
+                }}
+              />
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title={mode === "parallel" ? "Priority only matters in Optimized mode" : "Who gets the screen, keyboard and mouse first"}>
+                Priority
+                <NativeSelect value={priority} onChange={(e) => setPriority(e.target.value as Priority)} className="h-8 w-28 text-xs" disabled={mode === "parallel"}>
+                  <option value="high">High</option>
+                  <option value="normal">Normal</option>
+                  <option value="low">Low</option>
+                </NativeSelect>
+              </label>
+            </>
+          )}
           <span className="text-xs text-muted-foreground">⌘↩ to start · tasks run side by side</span>
         </div>
       </Card>
@@ -268,6 +309,7 @@ export function RunPage() {
         <div className="mt-4">
           <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
             <Eye className="size-3.5" /> Watching {stream.done ? "finished run" : "run"} {stream.currentRunId ?? runId}
+            {stream.done && <Rating runId={stream.currentRunId ?? runId} />}
             <Link className="ml-auto text-primary hover:underline" to={`/runs/${stream.currentRunId ?? runId}`}>
               open in Runs
             </Link>

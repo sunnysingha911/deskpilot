@@ -2,8 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { Bot, History, Play, Plug, ScrollText } from "lucide-react";
 import { useEffect } from "react";
 import { Link, NavLink, Outlet } from "react-router";
+import { Orb } from "@/components/Orb";
 import { get } from "@/lib/api";
-import type { Meta } from "@/lib/types";
+import type { ArsenalReport, Meta } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -14,12 +15,19 @@ const NAV = [
   { to: "/activity", label: "Activity log", icon: ScrollText },
 ];
 
+/** A.R.S.E.N.A.L's report (settings include the orb colour). */
+export function useArsenal() {
+  return useQuery({ queryKey: ["arsenal"], queryFn: () => get<ArsenalReport>("/api/arsenal"), staleTime: 10_000 });
+}
+
 export function useMeta() {
   return useQuery({ queryKey: ["meta"], queryFn: () => get<Meta>("/api/meta"), refetchInterval: 2000 });
 }
 
 export function Layout() {
   const meta = useMeta();
+  const arsenal = useArsenal();
+  const openSuggestions = arsenal.data?.suggestions.filter((s) => s.status === "open").length ?? 0;
   return (
     <div className="grid h-screen grid-cols-[220px_1fr]">
       <aside className="flex flex-col border-r bg-card px-3 py-4">
@@ -27,6 +35,17 @@ export function Layout() {
           <img src="./icon.svg" alt="" className="size-5" /> deskpilot
         </div>
         <nav className="flex flex-col gap-0.5">
+          <NavLink
+            to="/arsenal"
+            className={({ isActive }) =>
+              cn("mb-1 flex items-center gap-2 rounded-md px-1.5 py-1.5 text-sm hover:bg-muted", isActive && "bg-accent font-semibold text-accent-foreground hover:bg-accent")
+            }
+            title="Adaptive Response System Engineered for Natural Assistance & Learning"
+          >
+            <Orb color={arsenal.data?.settings.color ?? "#ff8a1f"} size={22} className="-my-2" />
+            <span className="tracking-wide">A.R.S.E.N.A.L</span>
+            {openSuggestions > 0 && <span className="ml-auto rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">{openSuggestions}</span>}
+          </NavLink>
           {NAV.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}

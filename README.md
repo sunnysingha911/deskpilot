@@ -80,6 +80,17 @@ npm test                                               # unit tests (no network,
 
 Irreversible tool calls prompt `y/N` in an interactive terminal and are denied otherwise.
 
+## A.R.S.E.N.A.L
+
+**A**daptive **R**esponse **S**ystem **E**ngineered for **N**atural **A**ssistance & **L**earning is
+deskpilot's own learning layer: small models built into the app (no AI provider) that learn from every
+task you run. Pick **A.R.S.E.N.A.L: let it decide** on the Run page and it chooses the agent, the AI
+and how it runs, and tells you why ("job-hunter: you sent 3 similar tasks to it yourself…"). Rate runs
+👍 / 👎 to teach it. Its page shows what it has learned about your agents and providers, and suggests
+improvements (budgets, models) that you approve; each is tried on 5 tasks and undone automatically if
+results get worse. It can't change tools, instructions or approval rules. On the desktop it appears as
+a glowing orb (choose its colour on its page).
+
 ## Talking with agents
 
 On the Run page (and a run's page) there's a chat box under the timeline: message an agent while it

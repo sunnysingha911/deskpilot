@@ -469,3 +469,83 @@ html.overlay body {
 }
 .ov-slot:has(.ov-menu) .ov-bubble,
 .ov-slot:has(.ov-card) .ov-bubble { visibility: hidden; }
+
+/* ── A.R.S.E.N.A.L orb: a sphere of arcs ─────────────────────────────────── */
+.orb * { transform-box: view-box; }
+.orb-body { transform-origin: 60px 78px; animation: orb-float 4.5s ease-in-out infinite; }
+.orb-shadow { transform-origin: 60px 160px; animation: orb-shadow 4.5s ease-in-out infinite; }
+.orb-halo { transform-origin: 60px 78px; animation: orb-breathe 3.4s ease-in-out infinite; }
+.orb-core { transform-origin: 60px 78px; animation: orb-breathe 2.2s ease-in-out infinite; }
+.orb-ring { transform-origin: 60px 78px; }
+.orb-ring-a { animation: orb-spin 14s linear infinite; }
+.orb-ring-ticks { animation: orb-spin 40s linear infinite reverse; }
+.orb-ring-core { animation: orb-spin 3.5s linear infinite reverse; }
+/* The sphere's arc tracks: each turns (duration/direction inline), its arcs travel along it. */
+.orb-track { transform-origin: 60px 78px; animation-name: orb-spin; animation-timing-function: linear; animation-iteration-count: infinite; }
+.orb-flow { animation-name: orb-flow; animation-timing-function: linear; animation-iteration-count: infinite; }
+.orb-orbits { transform-origin: 60px 78px; }
+/* Busy states add an overall turn on top, so the whole sphere churns faster. */
+.orb-thinking .orb-orbits { animation: orb-spin 7s linear infinite; }
+.orb-working .orb-orbits { animation: orb-spin 10s linear infinite reverse; }
+.orb-talking .orb-orbits { animation: orb-pulse-scale 0.9s ease-in-out infinite; }
+.orb-thinking .orb-ring-a { animation-duration: 5s; }
+.orb-thinking .orb-core,
+.orb-working .orb-core { animation-duration: 0.9s; }
+.orb-working .orb-ring-core { animation-duration: 1.2s; }
+.orb-talking .orb-ticks { animation: orb-ticks 0.8s ease-in-out infinite; }
+.orb-talking .orb-ring-core { animation-duration: 1.6s; }
+.orb-happy .orb-halo { animation: orb-flare 1.2s ease-out infinite; }
+.orb-worried .orb-core { animation: orb-flicker 0.5s steps(2) infinite; }
+@keyframes orb-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+@keyframes orb-shadow { 0%, 100% { transform: scaleX(1); opacity: 0.22; } 50% { transform: scaleX(0.85); opacity: 0.12; } }
+@keyframes orb-breathe { 0%, 100% { transform: scale(1); opacity: 0.85; } 50% { transform: scale(1.08); opacity: 1; } }
+@keyframes orb-flare { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(1.25); opacity: 0.5; } }
+@keyframes orb-flicker { 0% { opacity: 1; } 100% { opacity: 0.55; } }
+@keyframes orb-spin { to { transform: rotate(360deg); } }
+@keyframes orb-flow { to { stroke-dashoffset: -100; } }
+.orb { overflow: visible; }
+/* Thinking: a scanning ring sweeps the sphere; data points orbit it. */
+.orb-scan, .orb-orbiters, .orb-progress, .orb-reticle-in { opacity: 0; transition: opacity 0.4s ease; }
+.orb-scan { transform-origin: 60px 78px; }
+.orb-thinking .orb-scan { opacity: 1; animation: orb-scan 2.6s ease-in-out infinite alternate; }
+.orb-thinking .orb-orbiters,
+.orb-working .orb-orbiters { opacity: 1; }
+/* Working: a progress arc races round the tick ring. */
+.orb-progress { transform-origin: 60px 78px; }
+.orb-working .orb-progress { opacity: 1; animation: orb-spin 1.4s linear infinite; }
+.orb-working .orb-ticks { animation: orb-ticks 1.4s ease-in-out infinite; }
+/* Interacting: brackets lock on (shrink in) and turn to face the pointer. */
+.orb-reticle { transition: transform 0.25s ease-out; }
+.orb-reticle-in { transform-origin: 60px 78px; transform: scale(1.25); transition: opacity 0.25s ease, transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1.2); }
+.orb-engaged .orb-reticle-in { opacity: 1; transform: scale(1); }
+.orb-listening .orb-reticle-in { animation: orb-pulse-scale 0.6s ease-in-out infinite; }
+@keyframes orb-scan {
+  0% { transform: translateY(-30px) scaleX(0.5); opacity: 0.2; }
+  20% { transform: translateY(-20px) scaleX(0.85); opacity: 1; }
+  50% { transform: translateY(0) scaleX(1); opacity: 1; }
+  80% { transform: translateY(20px) scaleX(0.85); opacity: 1; }
+  100% { transform: translateY(30px) scaleX(0.5); opacity: 0.2; }
+}
+/* Interaction */
+.orb-interactive { cursor: pointer; touch-action: none; outline: none; -webkit-tap-highlight-color: transparent; }
+.orb-interactive .orb-orbits { transition: transform 0.35s ease, filter 0.35s ease; }
+.orb-engaged .orb-orbits { transform: scale(1.08); filter: brightness(1.25); }
+.orb-engaged .orb-ring-a { animation-duration: 6s; }
+.orb-engaged .orb-halo { animation-duration: 1.8s; }
+.orb-interactive:focus-visible .orb-halo { animation: orb-flare 1.4s ease-out infinite; }
+.orb-burst .orb-orbits { animation: orb-spin 0.65s cubic-bezier(0.3, 0, 0.3, 1) 2; }
+.orb-burst .orb-ring-a { animation-duration: 1.2s; }
+.orb-listening .orb-orbits { animation: orb-pulse-scale 0.6s ease-in-out infinite; }
+.orb-listening .orb-halo { animation: orb-flare 0.9s ease-out infinite; }
+.orb-ripple { transform-origin: 60px 78px; animation: orb-ripple 0.95s ease-out forwards; pointer-events: none; }
+@keyframes orb-ripple { from { transform: scale(0.6); opacity: 0.9; } to { transform: scale(1.9); opacity: 0; } }
+@keyframes orb-pulse-scale { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+@keyframes orb-ticks { 0%, 100% { opacity: 0.35; stroke-width: 2.2; } 50% { opacity: 1; stroke-width: 3.6; } }
+@media (prefers-reduced-motion: reduce) {
+  .orb * { animation-duration: 0.01s !important; animation-iteration-count: 1 !important; }
+}
+.ov-arsenal { width: 260px; }
+.ov-preview { margin: 4px 0 2px; color: #fde68a; font-size: 11.5px; }
+.ov-preview-why { color: #9ca3af; font-size: 10.5px; margin-top: 1px; }
+.ov-menu-head b { white-space: nowrap; flex-shrink: 0; }
+.ov-menu-head span { min-width: 0; }

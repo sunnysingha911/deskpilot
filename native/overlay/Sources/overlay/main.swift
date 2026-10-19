@@ -3,7 +3,7 @@
 //
 // Protocol: the first stdin line is JSON config {url, origin, x?, y?, width?, height?}. stdin closing
 // (the parent exited) quits the overlay. Events go to stdout as JSON lines:
-//   {"event":"ready"} · {"event":"open","runId":"…"} · {"event":"moved","x":…,"y":…}
+//   {"event":"ready"} · {"event":"open","runId":"…"} · {"event":"openArsenal"} · {"event":"moved","x":…,"y":…}
 //
 // The window never becomes main and never activates the app, so the frontmost app stays frontmost
 // (input.* tools depend on that). It becomes key only while the user types into an avatar's reply
@@ -129,6 +129,8 @@ final class Controller: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             panel.resignKey()
             if let app = previousApp, !app.isTerminated { app.activate() }
             previousApp = nil
+        case "openArsenal":
+            emit(["event": "openArsenal"])
         case "open":
             if let runId = body["runId"] as? String, runId.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil {
                 emit(["event": "open", "runId": runId])

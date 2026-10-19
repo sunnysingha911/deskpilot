@@ -15,10 +15,12 @@ import { ActionLogger } from "../core/logger.ts";
 import { desktopLock, USER_TASK_ID } from "../core/desktop-lock.ts";
 import { PRIORITIES, RUN_MODES, type Priority, type RunMode } from "../core/task.ts";
 import { DATA_DIR, ROOT } from "../core/paths.ts";
-import { getConnection, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
+import { getConnection, isReady, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
+import { Arsenal, ARSENAL_ID } from "../arsenal/brain.ts";
+import { ArsenalStore } from "../arsenal/store.ts";
 import { availableTools } from "../tools/index.ts";
 import { PresenceTracker, type PresenceTiming } from "./presence.ts";
-import { RunManager } from "./runs.ts";
+import { defaultConnectionFor, RunManager } from "./runs.ts";
 
 /** The React UI's production build (npm run build:ui). A desktop shell can load the same folder. */
 export const UI_DIST = join(ROOT, "ui", "dist");
@@ -130,7 +132,31 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
   const tokenBuf = Buffer.from(token);
   const logger = opts.logger ?? new ActionLogger();
   const presence = new PresenceTracker(lookFor, opts.presenceTiming);
-  const runs = new RunManager(logger, presence);
+  // A.R.S.E.N.A.L: learns from every task (data/arsenal.db); the first start learns from past runs.
+  const arsenalStore = new ArsenalStore();
+  const ready = (id: string) => {
+    const c = getConnection(id);
+    return !!c && c.enabled && isReady(c);
+  };
+  const arsenal = new Arsenal(arsenalStore, {
+    logger,
+    agents: () => listAgents(),
+    canRun: (d) => ready(d.model.connection ?? defaultConnectionFor(d.model.provider)),
+    connectionReady: ready,
+  });
+  try {
+    arsenal.bootstrap();
+  } catch {
+    /* an unreadable history just means it starts fresh */
+  }
+  const runs = new RunManager(logger, presence, arsenal);
+  // Its orb lives on the desktop; the status counts open suggestions.
+  const openSuggestions = () => arsenalStore.suggestions().filter((s) => s.status === "open").length;
+  const showHome = () => {
+    const st = arsenal.settings();
+    presence.setHome({ enabled: st.desktop, color: st.color, suggestions: openSuggestions });
+  };
+  showHome();
   let port = 0;
 
   // While the user types into an avatar's reply box, the desktop belongs to them.
@@ -183,6 +209,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       const parsed = AgentDefinition.safeParse(body);
       if (!parsed.success) throw new HttpError(400, parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "));
       if (parsed.data.name !== m[1]) throw new HttpError(400, "name in body must match the URL");
+      if (parsed.data.name === ARSENAL_ID) throw new HttpError(400, `'${ARSENAL_ID}' is reserved for A.R.S.E.N.A.L`);
       mkdirSync(AGENTS_DIR, { recursive: true });
       writeFileSync(join(AGENTS_DIR, `${m[1]}.json`), JSON.stringify(parsed.data, null, 2) + "\n");
       return parsed.data;
@@ -268,6 +295,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       if (!run) throw new HttpError(404, "no such run");
       const { transcript_json: _t, ...rest } = run;
       const set = typeof run.attachments === "string" && setExists(run.attachments) ? run.attachments : null;
+      const exp = arsenalStore.experience(m[1]!);
       return {
         run: rest,
         attachments: set ? listSet(set).files.map(fileView) : [],
@@ -275,6 +303,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
         active: runs.isActive(m[1]!),
         pendingApprovals: runs.pendingApprovals(m[1]!),
         pendingQuestions: runs.pendingQuestions(m[1]!),
+        rating: exp?.rating ?? null,
         actions: logger.queryActions({ sessionId: m[1]!, limit: 1000 }).reverse(),
       };
     }],
@@ -365,6 +394,66 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
         unsubscribe();
       });
       return undefined;
+    }],
+
+    // A.R.S.E.N.A.L
+    ["GET", /^\/api\/arsenal$/, () => arsenal.report()],
+    ["POST", /^\/api\/arsenal\/decide$/, async (req) => {
+      const b = await readJson(req);
+      if (typeof b.task !== "string" || !b.task.trim()) throw new HttpError(400, "task is required");
+      try {
+        return arsenal.decide(b.task);
+      } catch (err) {
+        throw new HttpError(409, err instanceof Error ? err.message : String(err));
+      }
+    }],
+    ["PUT", /^\/api\/arsenal\/settings$/, async (req) => {
+      const b = await readJson(req);
+      try {
+        const next = arsenal.updateSettings({
+          ...(typeof b.color === "string" && { color: b.color }),
+          ...(typeof b.memory === "string" && { memory: b.memory }),
+          ...(typeof b.exploration === "number" && { exploration: b.exploration }),
+          ...(typeof b.desktop === "boolean" && { desktop: b.desktop }),
+        });
+        showHome();
+        return next;
+      } catch (err) {
+        throw new HttpError(400, err instanceof Error ? err.message : String(err));
+      }
+    }],
+    ["POST", /^\/api\/arsenal\/suggestions\/(\d+)$/, async (req, _res, m) => {
+      const b = await readJson(req);
+      try {
+        if (b.action === "apply") {
+          const r = arsenal.applySuggestion(Number(m[1]), "user:gui");
+          presence.refreshHome();
+          return r;
+        }
+        if (b.action === "reject") {
+          arsenal.rejectSuggestion(Number(m[1]));
+          presence.refreshHome();
+          return { ok: true };
+        }
+      } catch (err) {
+        throw new HttpError(400, err instanceof Error ? err.message : String(err));
+      }
+      throw new HttpError(400, "action must be apply or reject");
+    }],
+    ["POST", /^\/api\/arsenal\/changes\/(\d+)\/undo$/, (_req, _res, m) => {
+      try {
+        arsenal.undoChange(Number(m[1]), "user:gui");
+        return { ok: true };
+      } catch (err) {
+        throw new HttpError(400, err instanceof Error ? err.message : String(err));
+      }
+    }],
+    ["POST", /^\/api\/runs\/([\w-]+)\/rating$/, async (req, _res, m) => {
+      const b = await readJson(req);
+      if (![1, -1, 0].includes(b.rating)) throw new HttpError(400, "rating must be 1, -1 or 0");
+      const e = arsenal.rate(m[1]!, b.rating === 0 ? null : b.rating);
+      if (!e) throw new HttpError(404, "no finished run with that id");
+      return { rating: e.rating, reward: e.reward };
     }],
 
     // Attachments: upload one file per request (raw body), into a new set or an existing one.
@@ -475,6 +564,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     close: async () => {
       stopTyping();
       await runs.shutdown();
+      arsenalStore.close();
       await new Promise<void>((resolve) => {
         presence.close();
         server.closeAllConnections();

@@ -5,6 +5,7 @@ import { listSet, setExists, type AttachmentSet } from "../core/attachments.ts";
 import { randomUUID } from "node:crypto";
 import { handoffTaskMessage, type ParentLink } from "../agent/delegate.ts";
 import type { Interaction, Question } from "../agent/interaction.ts";
+import { ARSENAL_ID, ARSENAL_NAME, type Arsenal, type Decision } from "../arsenal/brain.ts";
 import { listAgents, loadAgent, parseMentions, type AgentDefinition } from "../agent/definition.ts";
 import { newRunId, runAgent, type RunEvent } from "../agent/runner.ts";
 import { Executor, type ApprovalDecision, type ApprovalRequest, type Approver } from "../core/executor.ts";
@@ -113,6 +114,7 @@ export class RunManager {
   constructor(
     private logger: ActionLogger,
     private presence?: PresenceTracker,
+    private arsenal?: Arsenal,
   ) {}
 
   /** The active task a run id belongs to (its current attempt or its first run id). */
@@ -239,9 +241,23 @@ export class RunManager {
     return attempts;
   }
 
-  start(req: StartRequest): { runId: string } {
+  start(req: StartRequest): { runId: string; decision?: Decision } {
     if (this.actives.size >= MAX_ACTIVE_RUNS) {
       throw Object.assign(new Error(`${MAX_ACTIVE_RUNS} tasks are already running; stop one or wait for one to finish`), { status: 409 });
+    }
+    // "Let A.R.S.E.N.A.L decide": it picks the agent, provider and run settings (the user's own picks win).
+    let decision: Decision | undefined;
+    if (req.agent === ARSENAL_ID && !req.followUp) {
+      if (!this.arsenal) throw new Error(`${ARSENAL_NAME} isn't available`);
+      decision = this.arsenal.decide(req.task);
+      req = {
+        ...req,
+        agent: decision.agent,
+        connection: req.connection ?? decision.connection,
+        model: req.model ?? decision.model,
+        mode: req.mode ?? decision.mode,
+        priority: req.priority ?? decision.priority,
+      };
     }
     let def = loadAgent(req.agent);
     const known = listAgents().map((a) => a.name);
@@ -350,6 +366,13 @@ export class RunManager {
     this.presence?.describe(runId, req.task);
     // A follow-up's task is the user's reply: show it in the conversation.
     if (req.followUp) this.publish(runId, { type: "user_message", text: req.task, followUpOf: req.followUp });
+    // Notes from similar earlier tasks (a follow-up already has its conversation).
+    const memory = this.arsenal?.settings().memory ?? "off";
+    const notes = !req.followUp && (memory === "all" || (memory === "routed" && decision)) ? this.arsenal?.notesFor(req.task, def.name) : undefined;
+    if (decision) {
+      this.publish(runId, { type: "arsenal_decision", ...decision, notes: !!notes });
+      this.presence?.orb(runId, `sending ${decision.agent}`, this.arsenal!.settings().color);
+    } else if (notes) this.publish(runId, { type: "arsenal_notes" });
 
     const approver: Approver = (r) =>
       new Promise<ApprovalDecision>((resolve) => {
@@ -367,14 +390,17 @@ export class RunManager {
           caller: r.caller,
           chain: r.chain ?? [r.caller],
           ...(r.sessionId !== active.runId && { subRunId: r.sessionId }),
+          ...this.approvalHistory(r.tool, r.input),
         });
       });
 
     active.done = (async () => {
       let currentRunId = runId;
+      let usedConnection = attempts[0]!.conn.id;
       try {
         for (let i = 0; i < attempts.length; i++) {
           const { conn, model } = attempts[i]!;
+          usedConnection = conn.id;
           const attemptDef: AgentDefinition = {
             ...def,
             model: { ...def.model, provider: conn.kind, connection: conn.id, id: model, baseUrl: conn.baseUrl, apiKeyEnv: conn.keyEnv },
@@ -417,6 +443,7 @@ export class RunManager {
             task: taskInfo,
             interaction,
             history,
+            notes,
             onEvent: (e, id) => this.publish(currentRunId, e, id),
             // A follow-up's files were already shown to the model in the earlier run.
             attachments: attachmentSet && { set: attachmentSet, showToModel: !req.followUp },
@@ -434,12 +461,29 @@ export class RunManager {
         for (const [id] of active.pending) this.decide(active.runId, id, false, "policy:run-ended");
         for (const [id] of active.questions) this.dropQuestion(active, id, "policy:run-ended");
         await endTask(taskInfo.id); // e.g. close the task's browser tabs
+        // A.R.S.E.N.A.L learns from every finished task, routed or not.
+        try {
+          this.arsenal?.observe(currentRunId, { connection: usedConnection, mode: active.mode, routed: !!decision });
+          this.presence?.refreshHome(); // it may have new suggestions
+        } catch {
+          /* learning must never break a run */
+        }
         this.publish(currentRunId, { type: "closed" });
         this.actives.delete(active.rootKey);
       }
     })();
 
-    return { runId };
+    return { runId, ...(decision && { decision }) };
+  }
+
+  /** "You approved 2 and denied 5 like this" for an approval card (information only). */
+  private approvalHistory(tool: string, input: unknown): { history?: { approved: number; denied: number } } {
+    try {
+      const h = this.arsenal?.approvalHistory(tool, input);
+      return h && h.approved + h.denied > 0 ? { history: h } : {};
+    } catch {
+      return {};
+    }
   }
 
   /** Stop every task (pending approvals are denied) and wait for them to wind down, so none stays "running". */

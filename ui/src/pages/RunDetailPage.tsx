@@ -3,6 +3,7 @@ import { ArrowLeft, Forward, Square, Users, Wrench } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 import { AttachmentList } from "@/components/Attachments";
 import { ChatBox } from "@/components/ChatBox";
+import { Rating } from "@/components/Rating";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
 import { StatusBadge } from "@/components/ui/badge";
@@ -69,9 +70,12 @@ export function RunDetailPage() {
           <Stat label="tool calls">{d.actions.length}</Stat>
         </div>
         {r.error && <p className="mt-2 text-xs text-bad">{r.error}</p>}
-        <p className="mt-2 text-xs text-muted-foreground">
-          {r.id} · started {fmtTime(r.started_at)}
-        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <p className="text-xs text-muted-foreground">
+            {r.id} · started {fmtTime(r.started_at)}
+          </p>
+          {stream.done && r.relation !== "delegate" && <Rating runId={r.id} initial={d.rating} />}
+        </div>
         {r.parent_run_id && (
           <p className="mt-2 text-sm">
             {r.relation === "handoff" ? "Continued from " : "Called by "}

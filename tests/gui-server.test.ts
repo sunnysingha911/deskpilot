@@ -13,6 +13,7 @@ import { startGuiServer, type GuiServer } from "../src/gui/server.ts";
 const tmp = mkdtempSync(join(ensureDir(SCRATCH_DIR), "gui-test-"));
 process.env.DESKPILOT_UPLOADS_DIR = join(tmp, "uploads");
 process.env.DESKPILOT_DESKTOP_LOCK = join(tmp, "desktop.lock");
+process.env.DESKPILOT_ARSENAL_DB = join(tmp, "arsenal.db");
 const logger = new ActionLogger(join(tmp, "actions.db"));
 const SETTINGS = join(DATA_DIR, "settings.json");
 const settingsBackup = existsSync(SETTINGS) ? readFileSync(SETTINGS, "utf8") : null;
@@ -546,5 +547,43 @@ describe("talking with agents through the GUI", () => {
     assert.equal((await call("POST", "/api/overlay/typing", { on: false })).body.holding, false);
     await action;
     assert.equal(ran, true);
+  });
+});
+
+describe("A.R.S.E.N.A.L through the GUI", () => {
+  test("its name is reserved; settings are validated; decide explains itself; runs can be rated and it learns", async () => {
+    const reserved = await call("PUT", "/api/agents/arsenal", { name: "arsenal", description: "", system: "x", tools: ["shell.run"], model: { provider: "anthropic", id: "m" } });
+    assert.equal(reserved.status, 400);
+    assert.match(reserved.body.error, /reserved/);
+
+    assert.equal((await call("PUT", "/api/arsenal/settings", { color: "orange" })).status, 400);
+    const set = await call("PUT", "/api/arsenal/settings", { color: "#00aaff", memory: "all", exploration: 2 });
+    assert.deepEqual([set.body.color, set.body.memory, set.body.exploration], ["#00aaff", "all", 1]);
+    await call("PUT", "/api/arsenal/settings", { color: "#ff8a1f", memory: "routed", exploration: 0.3 });
+
+    process.env.XAI_API_KEY = "xai-test-key-for-mock";
+    try {
+      const d = await call("POST", "/api/arsenal/decide", { task: "gui test task" });
+      assert.equal(d.status, 200, JSON.stringify(d.body));
+      assert.ok(typeof d.body.agent === "string" && Array.isArray(d.body.why) && d.body.why.length > 0);
+      assert.ok(["optimized", "parallel"].includes(d.body.mode));
+
+      // A finished run is learned from and can be rated.
+      mockHandler = (b) => ((b.messages ?? []).some((m: any) => m.role === "user" && String(m.content).includes("RATE-ME")) ? { choices: [{ message: { role: "assistant", content: "rated answer" }, finish_reason: "stop" }] } : undefined);
+      const { runId } = (await call("POST", "/api/runs", { agent: AGENT, task: "RATE-ME say something" })).body;
+      await readEvents(runId, (t) => t.includes("closed"));
+      await new Promise((r) => setTimeout(r, 50));
+      const before = (await call("GET", "/api/arsenal")).body;
+      assert.ok(before.experiences >= 1);
+      assert.ok(before.agents.some((a: any) => a.agent === AGENT && a.runs >= 1));
+      const rated = await call("POST", `/api/runs/${runId}/rating`, { rating: -1 });
+      assert.equal(rated.body.rating, -1);
+      assert.ok(rated.body.reward < 1);
+      assert.equal((await call("GET", `/api/runs/${runId}`)).body.rating, -1);
+      assert.equal((await call("POST", `/api/runs/${runId}/rating`, { rating: 5 })).status, 400);
+    } finally {
+      mockHandler = undefined;
+      delete process.env.XAI_API_KEY;
+    }
   });
 });

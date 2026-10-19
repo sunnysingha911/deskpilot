@@ -7,6 +7,7 @@ import { ToastProvider } from "@/components/Toast";
 import { Card } from "@/components/ui/card";
 import { TOKEN } from "@/lib/api";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { ArsenalPage } from "@/pages/ArsenalPage";
 import { AgentEditorPage } from "@/pages/AgentEditorPage";
 import { AgentsPage } from "@/pages/AgentsPage";
 import { OverlayPage } from "@/pages/OverlayPage";
@@ -27,6 +28,7 @@ const router = createHashRouter([
     children: [
       { index: true, element: <Navigate to="/run" replace /> },
       { path: "run", element: <RunPage /> },
+      { path: "arsenal", element: <ArsenalPage /> },
       { path: "agents", element: <AgentsPage /> },
       { path: "agents/new", element: <AgentEditorPage mode="new" /> },
       { path: "agents/:name/edit", element: <AgentEditorPage mode="edit" /> },

@@ -111,3 +111,47 @@ describe("presence", () => {
     t.close();
   });
 });
+
+describe("A.R.S.E.N.A.L's permanent orb", () => {
+  test("always there, status follows tasks and suggestions, reacts to routing and finished tasks; can be turned off", async () => {
+    const { t, of } = tracker();
+    let open = 0;
+    t.setHome({ enabled: true, color: "#ff8a1f", suggestions: () => open });
+    const home = () => t.snapshot().avatars.find((a) => a.key === "arsenal");
+    assert.deepEqual([home()!.kind, home()!.status, home()!.depth], ["orb", "ready: click to give me a task", -1]);
+
+    open = 2;
+    t.refreshHome();
+    assert.equal(home()!.status, "2 suggestions for you");
+
+    t.arrive("r1", "r1", "coder", 0);
+    assert.deepEqual([home()!.status, home()!.mood], ["watching 1 task", "working"], "works (flares) while a task runs");
+
+    // Routing: the permanent orb speaks instead of a temporary one appearing.
+    t.orb("r1", "sending coder", "#ff8a1f", 30);
+    assert.deepEqual([home()!.mood, home()!.status], ["talking", "sending coder"]);
+    assert.equal(t.snapshot().avatars.filter((a) => a.kind === "orb").length, 1);
+    await wait(45);
+    assert.equal(home()!.status, "watching 1 task");
+
+    t.apply("r1", { type: "end", summary: { status: "completed" } });
+    assert.deepEqual([home()!.mood, home()!.status], ["happy", "coder finished"]);
+    t.apply("r1", { type: "closed" });
+    await wait(60);
+    assert.equal(of("coder"), undefined);
+    assert.equal(home()!.mood, "happy", "still celebrating the finished task");
+    t.homeSay("talking", "one moment", 10);
+    await wait(25);
+    assert.deepEqual([home()!.mood, home()!.status], ["idle", "2 suggestions for you"], "then rests: nothing runs");
+    t.leave("arsenal");
+    await wait(30);
+    assert.ok(home(), "the permanent orb never leaves on its own");
+
+    t.setHome({ enabled: false, color: "#ff8a1f" });
+    assert.equal(home(), undefined);
+    // With it hidden, routing shows a brief orb instead.
+    t.orb("r2", "sending coder", "#00aaff", 10);
+    assert.equal(t.snapshot().avatars.find((a) => a.kind === "orb")!.color, "#00aaff");
+    t.close();
+  });
+});

@@ -24,6 +24,9 @@ export interface Presence {
   startedAt: number;
   steps: number;
   outputTokens: number;
+  /** "orb": A.R.S.E.N.A.L itself (drawn as a glowing sphere in `color`), not an agent. */
+  kind?: "orb" | undefined;
+  color?: string | undefined;
 }
 
 export interface PresenceState {
@@ -56,7 +59,13 @@ export interface PresenceTiming {
 }
 export const DEFAULT_TIMING: PresenceTiming = { leaveAfterEndMs: 4000, leaveAfterDelegateMs: 2500, dissolveMs: 1600 };
 
+/** Key of A.R.S.E.N.A.L's permanent orb on the desktop. */
+export const HOME_KEY = "arsenal";
+
 export class PresenceTracker {
+  private home = { enabled: false, color: "#ff8a1f", suggestions: () => 0 };
+  private homeTimer: NodeJS.Timeout | null = null;
+
   private avatars = new Map<string, Presence>();
   private inputDepth = 0;
   private listeners = new Set<(s: PresenceState) => void>();
@@ -93,6 +102,114 @@ export class PresenceTracker {
   arrive(key: string, rootRunId: string, agent: string, depth: number, mood: Mood = "idle", status = "on my way"): void {
     this.avatars.set(key, { key, rootRunId, agent, look: this.lookFor(agent), mood, status, depth, leaving: false, startedAt: Date.now(), steps: 0, outputTokens: 0 });
     this.notify();
+    this.refreshHome();
+  }
+
+  /**
+   * A.R.S.E.N.A.L's permanent orb: always on the desktop (unless turned off), with a status in our
+   * own words (tasks running, suggestions waiting, or ready). `suggestions` counts open ones.
+   */
+  setHome(o: { enabled: boolean; color: string; suggestions?: () => number }): void {
+    this.home = { ...this.home, ...o };
+    if (!o.enabled) {
+      this.avatars.delete(HOME_KEY);
+      return this.notify();
+    }
+    const a = this.avatars.get(HOME_KEY);
+    if (a) a.color = o.color;
+    else
+      this.avatars.set(HOME_KEY, {
+        key: HOME_KEY,
+        rootRunId: "",
+        agent: "A.R.S.E.N.A.L",
+        look: this.lookFor("arsenal"),
+        mood: "idle",
+        status: this.homeIdle(),
+        depth: -1, // first in line, before the agents
+        leaving: false,
+        startedAt: Date.now(),
+        steps: 0,
+        outputTokens: 0,
+        kind: "orb",
+        color: o.color,
+      });
+    this.notify();
+  }
+
+  private runningTasks(): number {
+    return [...this.avatars.values()].filter((a) => a.depth === 0 && a.kind !== "orb" && !a.leaving && a.rootRunId).length;
+  }
+
+  /** The orb works (solar flares) while any task runs, and rests otherwise. */
+  private homeMood(): Mood {
+    return this.runningTasks() ? "working" : "idle";
+  }
+
+  private homeIdle(): string {
+    const running = this.runningTasks();
+    const open = this.home.suggestions();
+    if (running) return `watching ${running} task${running === 1 ? "" : "s"}`;
+    if (open) return `${open} suggestion${open === 1 ? "" : "s"} for you`;
+    return "ready: click to give me a task";
+  }
+
+  /** Say something for a moment, then go back to the idle status. False if the orb isn't shown. */
+  homeSay(mood: Mood, status: string, ms = 4000): boolean {
+    const a = this.avatars.get(HOME_KEY);
+    if (!a) return false;
+    a.mood = mood;
+    a.status = short(status);
+    this.notify();
+    if (this.homeTimer) {
+      clearTimeout(this.homeTimer);
+      this.timers.delete(this.homeTimer);
+    }
+    const t = setTimeout(() => {
+      this.timers.delete(t);
+      this.homeTimer = null;
+      a.mood = this.homeMood();
+      a.status = this.homeIdle();
+      this.notify();
+    }, ms);
+    this.timers.add(t);
+    this.homeTimer = t;
+    return true;
+  }
+
+  /** Recompute the idle status (tasks or suggestions changed). */
+  refreshHome(): void {
+    const a = this.avatars.get(HOME_KEY);
+    if (!a || this.homeTimer) return;
+    const next = this.homeIdle();
+    const mood = this.homeMood();
+    if (next !== a.status || mood !== a.mood) {
+      a.status = next;
+      a.mood = mood;
+      this.notify();
+    }
+  }
+
+  /** A.R.S.E.N.A.L routed a task: its permanent orb says so, or (if it's hidden) a brief orb appears. */
+  orb(rootKey: string, status: string, color: string, stayMs = 5000): void {
+    if (this.homeSay("talking", status, stayMs)) return;
+    const key = `arsenal:${rootKey}`;
+    this.avatars.set(key, {
+      key,
+      rootRunId: rootKey,
+      agent: "A.R.S.E.N.A.L",
+      look: this.lookFor("arsenal"),
+      mood: "talking",
+      status: short(status),
+      depth: 0,
+      leaving: false,
+      startedAt: Date.now(),
+      steps: 0,
+      outputTokens: 0,
+      kind: "orb",
+      color,
+    });
+    this.notify();
+    this.leave(key, stayMs);
   }
 
   /** Attach the user's task text to a top-level avatar (shown on hover). */
@@ -105,6 +222,7 @@ export class PresenceTracker {
 
   /** Send an agent away (it disintegrates into dust). */
   leave(key: string, afterMs = 0): void {
+    if (key === HOME_KEY) return; // the permanent orb never leaves (turn it off in its settings)
     this.later(afterMs, () => {
       const a = this.avatars.get(key);
       if (!a || a.leaving) return;
@@ -114,6 +232,7 @@ export class PresenceTracker {
         if (this.avatars.get(key)?.leaving) {
           this.avatars.delete(key);
           this.notify();
+          this.refreshHome();
         }
       });
     });
@@ -166,6 +285,13 @@ export class PresenceTracker {
       return;
     }
     if (e.type === "stopping") return this.set(rootKey, "sad", "stopping");
+    // The orb reacts when a task the user started finishes.
+    if (e.type === "end") {
+      const who = this.avatars.get(rootKey)?.agent ?? "the task";
+      const st = (e.summary as { status?: string } | undefined)?.status;
+      if (st === "completed") this.homeSay("happy", `${who} finished`, 3500);
+      else if (st && st !== "stopped") this.homeSay("frustrated", `${who} didn't finish`, 4500);
+    }
     if (e.type === "fallback") return this.set(rootKey, "thinking", `switching to ${e.to}`);
     this.applyRun(rootKey, rootKey, 0, e);
   }

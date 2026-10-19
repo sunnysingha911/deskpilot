@@ -57,6 +57,8 @@ src/gui/         control panel backend: server.ts (localhost API + SSE, serves u
 ui/              control panel frontend: React 19 + TS + Vite + Tailwind 4 + shadcn-style components
                  (ui/src/components/ui), React Router (hash routing), TanStack Query, react-hook-form.
                  Builds to static ui/dist (gitignored) so Electron/Tauri can load it later.
+src/arsenal/     A.R.S.E.N.A.L: deskpilot's own learning layer (no AI provider): text.ts (TF-IDF), store.ts
+                 (data/arsenal.db), brain.ts (router, provider picker, suggestions, trials, undo, notes)
 src/agent/schema.ts  browser-safe zod agent schema shared by core, CLI and UI
 src/llm/connections.ts  named provider connections, data/settings.json, write-only key storage in .env
 native/axhelper/ Swift package for AX API (+ `pdf-text` via PDFKit)
@@ -83,6 +85,8 @@ data/            SQLite DBs (gitignored)
   Done so far: agent-to-agent delegation (`agent.delegate`), @mentions, GUI picks and hand-offs;
   `orchestrator` (plans with `plan.update`, delegates to any agent, no desktop tools) and specialists
   `coder`, `security-auditor`, `job-hunter`, `notes-reader`. File attachments on tasks (`file.read`).
+  A.R.S.E.N.A.L Phase 1 (own learning layer) done; Phase 2 = its voice on a local model (Ollama),
+  Phase 3 = opt-in local fine-tuning (MLX, project-local venv; ask first).
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
@@ -108,6 +112,26 @@ data/            SQLite DBs (gitignored)
   `prompt_eval_count` includes cached tokens; input = prompt_eval_count − prompt_eval_cached_count.
   effort → `think` (low = off). Only tool-capable models are offered. `/api/ps` reports
   context_length 4096 under the MLX runner even when the larger num_ctx is honored (verified).
+
+## A.R.S.E.N.A.L invariants (Adaptive Response System Engineered for Natural Assistance & Learning)
+- Phase 1 is its own models, no LLM: router = k nearest past tasks (TF-IDF cosine) weighted by reward
+  + the user's own picks (intent) + a description/tool prior capped at the task type's average
+  + UCB exploration scaled by fit (unrelated agents are never "explored"); ties go to evidence.
+  Provider picker = per-agent arms with ≥3 runs. `decide()` always returns human-readable `why`.
+- Learns from every finished top-level task (RunManager calls `observe` in the run's finally; delegated
+  runs fold into their parent; failures before the first step are the provider's, not the agent's).
+  Reward: completed 1 / cut short 0.3 / else 0; −0.2 if anything was blocked; −0.15 × tokens/20k; 👍 +0.4,
+  👎 −0.8. First start bootstraps from past runs. Data: data/arsenal.db (`DESKPILOT_ARSENAL_DB` in tests).
+- It may change ONLY `PATCHABLE` agent fields (budgets, model.connection/id), only via a suggestion the
+  user applies; each change runs a 5-task trial and is auto-reverted if mean reward drops > 0.15; undo
+  restores just those fields. Tools, instructions, approval rules and the safety core are out of reach.
+- Its notes (similar past tasks + results) go to agents inside `<untrusted_data source="arsenal-notes">`.
+  Approval history on approval cards is information only; it never approves or denies.
+- `agent: "arsenal"` on POST /api/runs = let it decide (user's explicit picks win); the name is reserved.
+  The desktop shows it as a permanent orb (presence key "arsenal", `kind: "orb"`, depth −1, never leaves;
+  `settings.desktop` hides it): its status is our own words (tasks running / suggestions / ready), it
+  says "sending X" when routing and reacts when tasks end; clicking it asks "What should I do?" (live
+  `decide` preview, Enter starts an `agent: "arsenal"` run; typing holds the desktop like reply boxes).
 
 ## Interaction invariants
 - `Interaction` (src/agent/interaction.ts): the user's messages to a running task are queued and delivered

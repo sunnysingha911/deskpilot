@@ -11,6 +11,8 @@ import { fmtNum, pretty } from "@/lib/format";
 import type { RunDetail, RunEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import type { RunStream } from "@/hooks/useRunEvents";
+import { Orb } from "@/components/Orb";
+import { useArsenal } from "@/components/Layout";
 
 type Ev = RunStream["events"][number];
 
@@ -142,6 +144,32 @@ function ToolItem({ call, result }: { call: Ev; result?: Ev }) {
   );
 }
 
+function ArsenalDecisionRow({ ev }: { ev: RunEvent }) {
+  const arsenal = useArsenal();
+  const [open, setOpen] = useState(false);
+  return (
+    <Row tone="info" icon={<Orb color={arsenal.data?.settings.color} size={18} className="-my-1" />}>
+      <div className="text-sm">
+        <b>A.R.S.E.N.A.L</b> sent <b>{ev.agent}</b>
+        {ev.connection ? ` on ${ev.connection} · ${ev.model}` : ""} · <span className="capitalize">{ev.mode}</span> · {ev.priority} priority{" "}
+        <span className="text-xs text-muted-foreground">({Math.round(ev.confidence * 100)}% sure{ev.notes ? ", with notes from similar tasks" : ""})</span>
+        {ev.explored && <Badge tone="info" className="ml-1.5">exploring</Badge>}
+        <button className="ml-2 cursor-pointer text-xs text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)}>
+          {open ? "▾ why" : "▸ why"}
+        </button>
+      </div>
+      {open && (
+        <ul className="mt-1 list-disc pl-5 text-xs text-muted-foreground">
+          {(ev.why as string[]).map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+          {(ev.alternatives as Array<{ agent: string; score: number }>).length > 0 && <li>next best: {(ev.alternatives as Array<{ agent: string; score: number }>).map((a) => `${a.agent} (${a.score})`).join(", ")}</li>}
+        </ul>
+      )}
+    </Row>
+  );
+}
+
 /** An agent's question. Its text is model output: shown as plain text, labelled, never linkified. */
 function QuestionItem({ q, answered }: { q: Ev; answered?: Ev }) {
   const [text, setText] = useState("");
@@ -241,6 +269,11 @@ function ApprovalItem({ req, resolved }: { req: Ev; resolved?: Ev }) {
         <StatusBadge value={req.risk} />
         {req.reason === "rule" && <Badge tone="warn">agent rule: always ask</Badge>}
       </div>
+      {req.history && (req.history.approved > 0 || req.history.denied > 0) && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          A.R.S.E.N.A.L: you approved {req.history.approved} and denied {req.history.denied} similar action{req.history.approved + req.history.denied === 1 ? "" : "s"} before. The choice is yours.
+        </p>
+      )}
       <Pre>{pretty(req.input)}</Pre>
       <div className="mt-3 flex items-center gap-2">
         {resolved ? (
@@ -272,6 +305,14 @@ function EventItem({ ev }: { ev: RunEvent }) {
           Using <b>{ev.label}</b> · <code className="font-mono text-xs">{ev.model}</code>
           {ev.attempt > 1 ? ` (attempt ${ev.attempt})` : ""}
         </Row>
+      );
+    case "arsenal_decision":
+      return <ArsenalDecisionRow ev={ev} />;
+    case "arsenal_notes":
+      return (
+        <div className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+          <Orb size={14} className="-my-1" /> A.R.S.E.N.A.L added notes from similar earlier tasks
+        </div>
       );
     case "user_message":
       return (

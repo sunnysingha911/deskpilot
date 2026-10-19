@@ -40,7 +40,7 @@ if (!noOpen) openPanel();
 
 let overlay: Overlay | undefined;
 if (!process.argv.includes("--no-overlay")) {
-  const o = startOverlay(gui.url, (runId) => openPanel(`#/runs/${runId}`));
+  const o = startOverlay(gui.url, (route) => openPanel(route));
   if ("error" in o) console.log(`desktop avatars: ${o.error}`);
   else overlay = o;
 }
