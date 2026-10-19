@@ -17,7 +17,10 @@ import { PRIORITIES, RUN_MODES, type Priority, type RunMode } from "../core/task
 import { DATA_DIR, ROOT } from "../core/paths.ts";
 import { getConnection, isReady, keyIsSet, listConnections, loadSettings, saveSettings, Settings, storeKey, testConnection } from "../llm/connections.ts";
 import { Arsenal, ARSENAL_ID } from "../arsenal/brain.ts";
-import { ArsenalStore } from "../arsenal/store.ts";
+import { ArsenalStore, HOTKEYS } from "../arsenal/store.ts";
+import { Speaker } from "../arsenal/speech.ts";
+import { Voice, type Chat } from "../arsenal/voice.ts";
+import type { OverlayCommand, OverlayVoiceEvents } from "./overlay.ts";
 import { availableTools } from "../tools/index.ts";
 import { PresenceTracker, type PresenceTiming } from "./presence.ts";
 import { defaultConnectionFor, RunManager } from "./runs.ts";
@@ -115,6 +118,8 @@ export interface GuiServer {
   server: Server;
   url: string;
   token: string;
+  /** Push-to-talk wiring for the desktop overlay: pass `events` to startOverlay, then `attach` its send. */
+  voiceBridge: { events: OverlayVoiceEvents; attach(send: (cmd: OverlayCommand) => void): void };
   close(): Promise<void>;
 }
 
@@ -127,7 +132,16 @@ function lookFor(agent: string): AvatarLook {
   }
 }
 
-export async function startGuiServer(opts: { port?: number; logger?: ActionLogger; presenceTiming?: PresenceTiming } = {}): Promise<GuiServer> {
+export async function startGuiServer(
+  opts: {
+    port?: number;
+    logger?: ActionLogger;
+    presenceTiming?: PresenceTiming;
+    /** Tests: a fake local model and model list for the voice, and a silent speaker. */
+    voice?: { chat?: Chat; listModels?: () => Promise<string[]>; prewarm?: boolean };
+    speaker?: Speaker;
+  } = {},
+): Promise<GuiServer> {
   const token = randomBytes(24).toString("hex");
   const tokenBuf = Buffer.from(token);
   const logger = opts.logger ?? new ActionLogger();
@@ -150,6 +164,80 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     /* an unreadable history just means it starts fresh */
   }
   const runs = new RunManager(logger, presence, arsenal);
+
+  // Its voice (local Ollama model), speech (macOS `say`, opt-in) and push-to-talk (the overlay helper).
+  const voice = new Voice(arsenal, { chat: opts.voice?.chat, listModels: opts.voice?.listModels });
+  const speaker = opts.speaker ?? new Speaker();
+  speaker.onChange((on) => (on ? presence.homeSay("talking", "speaking", 60_000) : presence.homeDone()));
+  /** Load the natural voice in the background when it will be used, so the first answer isn't slow. */
+  const warmVoice = () => {
+    const st = arsenal.settings();
+    if (st.speak !== "off" && st.speakEngine === "kokoro") void speaker.warmUp()?.catch((err) => console.log(`natural voice unavailable, using macOS say: ${err instanceof Error ? err.message : err}`));
+  };
+  warmVoice();
+  // Have the local model read the current facts ahead of time (shortly after start, then whenever a
+  // finished task changes them), so a question is answered in seconds instead of re-reading everything.
+  const prewarm = () => {
+    if (arsenal.settings().voice) void voice.prewarm();
+  };
+  const prewarmTimers = opts.voice?.prewarm === false ? [] : [setTimeout(prewarm, 5_000), setInterval(prewarm, 30_000)];
+  for (const t of prewarmTimers) t.unref();
+  const speakOpts = () => {
+    const st = arsenal.settings();
+    return { engine: st.speakEngine, voice: (st.speakEngine === "kokoro" ? st.kokoroVoice : st.speakVoice) || undefined, rate: st.speakRate || undefined };
+  };
+  let overlaySend: ((cmd: OverlayCommand) => void) | null = null;
+  const sendVoiceConfig = () => {
+    const st = arsenal.settings();
+    overlaySend?.({ cmd: "voice", listen: st.listen, hotkey: st.hotkey, locale: st.speechLocale });
+  };
+  const voiceBridge: GuiServer["voiceBridge"] = {
+    events: {
+      // Push-to-talk pressed: stop speaking first (so the mic never hears it), then let it listen.
+      pttDown: () => {
+        if (!arsenal.settings().listen) return overlaySend?.({ cmd: "cancel" });
+        speaker.setListening(true);
+        presence.homeSay("thinking", "listening", 35_000);
+        overlaySend?.({ cmd: "listen" });
+      },
+      listenEnd: () => {
+        speaker.setListening(false);
+        presence.homeDone();
+      },
+      voiceError: (message) => console.log(`push-to-talk: ${message}`),
+    },
+    attach: (send) => {
+      overlaySend = send;
+      sendVoiceConfig();
+    },
+  };
+  /**
+   * Speak if this request asked for it (`speak: true`) and the setting allows: "always", or "spoken"
+   * when the user spoke to it (`spoken: true`, push-to-talk).
+   */
+  const maybeSpeak = (text: string, b: { speak?: unknown; spoken?: unknown }) => {
+    const st = arsenal.settings();
+    if (b.speak !== true || st.speak === "off" || (st.speak === "spoken" && b.spoken !== true)) return;
+    speaker.speak(text, speakOpts());
+  };
+  /** Run a voice request; it's unavailable (503) when Ollama or the model isn't there. */
+  const voiceOp = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    const prev = presence.snapshot().avatars.find((a) => a.key === "arsenal")?.status;
+    if (prev && prev !== "speaking" && prev !== "listening") presence.homeSay("thinking", "thinking", 95_000);
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new HttpError(/no finished task/.test(msg) ? 404 : /no agent can run/.test(msg) ? 409 : 503, msg);
+    } finally {
+      if (!speaker.speaking) presence.homeDone();
+    }
+  };
+  const text = (v: unknown, name: string, max = 2000): string => {
+    if (typeof v !== "string" || !v.trim()) throw new HttpError(400, `${name} is required`);
+    if (v.length > max) throw new HttpError(400, `${name} is too long`);
+    return v.trim();
+  };
   // Its orb lives on the desktop; the status counts open suggestions.
   const openSuggestions = () => arsenalStore.suggestions().filter((s) => s.status === "open").length;
   const showHome = () => {
@@ -274,7 +362,7 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
       if (typeof b.agent !== "string" || !NAME_RE.test(b.agent)) throw new HttpError(400, "agent is required");
       if (typeof b.task !== "string" || !b.task.trim()) throw new HttpError(400, "task is required");
       try {
-        return runs.start({
+        const started = runs.start({
           agent: b.agent,
           task: b.task.trim(),
           connection: typeof b.connection === "string" && b.connection ? b.connection : undefined,
@@ -285,6 +373,10 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
           mode: RUN_MODES.includes(b.mode) ? (b.mode as RunMode) : undefined,
           priority: PRIORITIES.includes(b.priority) ? (b.priority as Priority) : undefined,
         });
+        // A task given by voice gets a spoken "on it" (our own words, not the model's).
+        const who = started.decision?.agent ?? b.agent;
+        if (b.spoken === true) maybeSpeak(`On it. Sending it to ${String(who).replace(/-/g, " ")}.`, { speak: true, spoken: true });
+        return started;
       } catch (err) {
         const status = (err as { status?: number }).status ?? 400;
         throw new HttpError(status, err instanceof Error ? err.message : String(err));
@@ -415,12 +507,67 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
           ...(typeof b.memory === "string" && { memory: b.memory }),
           ...(typeof b.exploration === "number" && { exploration: b.exploration }),
           ...(typeof b.desktop === "boolean" && { desktop: b.desktop }),
+          ...(typeof b.voice === "boolean" && { voice: b.voice }),
+          ...(typeof b.voiceModel === "string" && { voiceModel: b.voiceModel.trim() }),
+          ...(typeof b.speak === "string" && { speak: b.speak }),
+          ...(typeof b.speakVoice === "string" && { speakVoice: b.speakVoice }),
+          ...(typeof b.speakEngine === "string" && { speakEngine: b.speakEngine }),
+          ...(typeof b.kokoroVoice === "string" && { kokoroVoice: b.kokoroVoice }),
+          ...(typeof b.speakRate === "number" && { speakRate: b.speakRate }),
+          ...(typeof b.listen === "boolean" && { listen: b.listen }),
+          ...(typeof b.hotkey === "string" && { hotkey: b.hotkey }),
+          ...(typeof b.speechLocale === "string" && { speechLocale: b.speechLocale.trim() }),
         });
         showHome();
+        sendVoiceConfig();
+        if (next.speak === "off") speaker.stop();
+        warmVoice();
+        void voice.status(true).catch(() => {});
         return next;
       } catch (err) {
         throw new HttpError(400, err instanceof Error ? err.message : String(err));
       }
+    }],
+    // Its voice: everything it says is written by a local model (the UI labels it so).
+    ["GET", /^\/api\/arsenal\/voice$/, async () => {
+      const st = arsenal.settings();
+      return {
+        ...(await voice.status(true)),
+        speakAvailable: speaker.available,
+        speaking: speaker.speaking,
+        engine: st.speakEngine,
+        naturalVoiceError: speaker.kokoroError,
+        listen: st.listen,
+        hotkey: st.hotkey,
+        hotkeys: HOTKEYS,
+        pushToTalk: overlaySend !== null,
+      };
+    }],
+    ["GET", /^\/api\/arsenal\/voices$/, async () => ({ system: await speaker.voices(), natural: await speaker.kokoroVoices() })],
+    // "Test voice" on its page: a fixed line in our own words, spoken whatever the mode.
+    ["POST", /^\/api\/arsenal\/speak\/test$/, () => ({ speaking: speaker.speak("Hi, I'm Arsenal. This is how I'll sound when I answer you.", speakOpts()) })],
+    ["POST", /^\/api\/arsenal\/forget$/, () => (voice.forget(), { ok: true })],
+    ["POST", /^\/api\/arsenal\/ask$/, async (req) => {
+      const b = await readJson(req);
+      const question = text(b.question, "question");
+      const said = await voiceOp(() => voice.ask(question));
+      maybeSpeak(said.text, b);
+      return said;
+    }],
+    ["POST", /^\/api\/arsenal\/explain$/, async (req) => {
+      const b = await readJson(req);
+      const task = text(b.task, "task");
+      const said = await voiceOp(() => voice.explain(task));
+      maybeSpeak(said.text, b);
+      return said;
+    }],
+    ["POST", /^\/api\/arsenal\/speak\/stop$/, () => (speaker.stop(), { ok: true })],
+    ["POST", /^\/api\/runs\/([\w-]+)\/recap$/, async (req, _res, m) => {
+      const b = await readJson(req);
+      if (runs.isActive(m[1]!)) throw new HttpError(409, "the task is still running");
+      const said = await voiceOp(() => voice.recap(m[1]!));
+      maybeSpeak(said.text, b);
+      return said;
     }],
     ["POST", /^\/api\/arsenal\/suggestions\/(\d+)$/, async (req, _res, m) => {
       const b = await readJson(req);
@@ -561,7 +708,11 @@ export async function startGuiServer(opts: { port?: number; logger?: ActionLogge
     server,
     url: `http://127.0.0.1:${port}/?t=${token}`,
     token,
+    voiceBridge,
     close: async () => {
+      for (const t of prewarmTimers) clearTimeout(t);
+      speaker.stop();
+      overlaySend?.({ cmd: "cancel" });
       stopTyping();
       await runs.shutdown();
       arsenalStore.close();

@@ -69,9 +69,49 @@ export interface ArsenalSettings {
   exploration: number;
   /** Always show its orb on the desktop (click it to give it a task). */
   desktop: boolean;
+  /** Its voice: explains, answers and recaps in words, on a local Ollama model. */
+  voice: boolean;
+  /** Ollama model for the voice; "" = the Ollama connection's default model, else the first installed. */
+  voiceModel: string;
+  /** Speak its answers aloud (macOS `say`): never, when you spoke to it (push-to-talk), or always. */
+  speak: SpeakMode;
+  /** "kokoro" = natural local voice (Kokoro-82M); "system" = macOS `say`. */
+  speakEngine: "kokoro" | "system";
+  /** Kokoro voice id, e.g. af_heart. */
+  kokoroVoice: string;
+  /** `say` voice name; "" = the system voice. */
+  speakVoice: string;
+  /** Words per minute; 0 = the system rate. */
+  speakRate: number;
+  /** Push-to-talk: hold the hotkey (or the orb's mic button) and speak. On-device recognition only. */
+  listen: boolean;
+  hotkey: Hotkey;
+  /** Speech recognition locale, e.g. "en-IN"; "" = the system's. */
+  speechLocale: string;
 }
 
-export const DEFAULT_SETTINGS: ArsenalSettings = { color: "#ff8a1f", memory: "routed", exploration: 0.3, desktop: true };
+export const SPEAK_MODES = ["off", "spoken", "always"] as const;
+export type SpeakMode = (typeof SPEAK_MODES)[number];
+
+export const HOTKEYS = ["option+space", "control+option+space", "command+shift+space"] as const;
+export type Hotkey = (typeof HOTKEYS)[number];
+
+export const DEFAULT_SETTINGS: ArsenalSettings = {
+  color: "#ff8a1f",
+  memory: "routed",
+  exploration: 0.3,
+  desktop: true,
+  voice: true,
+  voiceModel: "",
+  speak: "spoken",
+  speakEngine: "kokoro",
+  kokoroVoice: "af_heart",
+  speakVoice: "",
+  speakRate: 0,
+  listen: false,
+  hotkey: "option+space",
+  speechLocale: "",
+};
 
 export class ArsenalStore {
   readonly db: DatabaseSync;
@@ -168,6 +208,9 @@ export class ArsenalStore {
     this.db.prepare(`INSERT OR REPLACE INTO kv (key, value_json) VALUES (?, ?)`).run(key, JSON.stringify(value));
   }
   settings(): ArsenalSettings {
-    return { ...DEFAULT_SETTINGS, ...this.get<Partial<ArsenalSettings>>("settings", {}) };
+    const s = { ...DEFAULT_SETTINGS, ...this.get<Partial<ArsenalSettings>>("settings", {}) };
+    // Before there were modes, speak was on/off (off was just the default).
+    if (typeof s.speak === "boolean") s.speak = s.speak ? "always" : "spoken";
+    return s;
   }
 }

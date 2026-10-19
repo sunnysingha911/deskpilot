@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { AGENTS_DIR, AgentDefinition } from "../agent/definition.ts";
 import type { ActionLogger } from "../core/logger.ts";
 import type { Priority, RunMode } from "../core/task.ts";
-import { ArsenalStore, type ArsenalSettings, type Experience, type Suggestion } from "./store.ts";
+import { ArsenalStore, HOTKEYS, SPEAK_MODES, type ArsenalSettings, type Experience, type Suggestion } from "./store.ts";
 import { cosine, Idf, sharedTerms, tokenize, type Vec } from "./text.ts";
 
 export const ARSENAL_NAME = "A.R.S.E.N.A.L";
@@ -124,6 +124,16 @@ export class Arsenal {
     if (!["routed", "all", "off"].includes(next.memory)) throw new Error("memory must be routed, all or off");
     next.exploration = Math.max(0, Math.min(1, Number(next.exploration) || 0));
     next.desktop = next.desktop !== false;
+    for (const k of ["voice", "listen"] as const) next[k] = !!next[k];
+    if (!SPEAK_MODES.includes(next.speak)) throw new Error(`speak must be one of ${SPEAK_MODES.join(", ")}`);
+    if (next.voiceModel && !/^[\w.:/-]{1,100}$/.test(next.voiceModel)) throw new Error("voiceModel must be an Ollama model name");
+    // Passed to `say -v` as an argument (never through a shell), still kept to plain names.
+    if (next.speakVoice && !/^[\p{L}\p{N} ()._-]{1,60}$/u.test(next.speakVoice)) throw new Error("speakVoice must be a voice name from the list");
+    if (!["kokoro", "system"].includes(next.speakEngine)) throw new Error("speakEngine must be kokoro or system");
+    if (!/^[a-z]{2}_[a-z]{2,20}$/.test(next.kokoroVoice)) throw new Error("kokoroVoice must look like af_heart");
+    next.speakRate = Math.round(Math.max(0, Math.min(400, Number(next.speakRate) || 0)));
+    if (!HOTKEYS.includes(next.hotkey)) throw new Error(`hotkey must be one of ${HOTKEYS.join(", ")}`);
+    if (next.speechLocale && !/^[a-z]{2,3}([-_][A-Za-z]{2,4})?$/.test(next.speechLocale)) throw new Error("speechLocale must look like en-US");
     this.store.set("settings", next);
     return next;
   }

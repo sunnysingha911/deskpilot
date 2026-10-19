@@ -37,6 +37,10 @@ browser, use keyboard and mouse. Later, an orchestrator agent delegates tasks to
 
 ## Stack
 - TypeScript on Node ≥ 24 (ESM, strict), run with `tsx`.
+- Natural voice: `kokoro-js` (Kokoro-82M, Apache-2.0; ONNX via transformers.js) for A.R.S.E.N.A.L's speech:
+  the only runtime dep beyond the SDK/playwright/zod, justified by on-device, cross-OS natural TTS. Model
+  (~90 MB, q8) cached in data/models (`env.cacheDir`), never ~/.cache. Its `sharp` dep has advisories but
+  never sees untrusted input (we only synthesize our own text).
 - LLM providers via own adapters (Phase 2+): `@anthropic-ai/sdk` + plain fetch for OpenAI-compatible APIs. API keys from env vars only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …); never committed or hardcoded.
 - Small Swift CLI helper (`native/axhelper`) for the Accessibility API, emits JSON.
 - Playwright (`playwright-core`, no bundled browser) drives a dedicated instance of the installed
@@ -58,11 +62,13 @@ ui/              control panel frontend: React 19 + TS + Vite + Tailwind 4 + sha
                  (ui/src/components/ui), React Router (hash routing), TanStack Query, react-hook-form.
                  Builds to static ui/dist (gitignored) so Electron/Tauri can load it later.
 src/arsenal/     A.R.S.E.N.A.L: deskpilot's own learning layer (no AI provider): text.ts (TF-IDF), store.ts
-                 (data/arsenal.db), brain.ts (router, provider picker, suggestions, trials, undo, notes)
+                 (data/arsenal.db), brain.ts (router, provider picker, suggestions, trials, undo, notes),
+                 voice.ts (its words, local Ollama), speech.ts (`say`), intent.ts (question vs task, browser-safe)
 src/agent/schema.ts  browser-safe zod agent schema shared by core, CLI and UI
 src/llm/connections.ts  named provider connections, data/settings.json, write-only key storage in .env
 native/axhelper/ Swift package for AX API (+ `pdf-text` via PDFKit)
-native/overlay/  Swift package: transparent always-on-top window hosting the avatars page (#/overlay)
+native/overlay/  Swift package: transparent always-on-top window hosting the avatars page (#/overlay);
+                 voice.swift = push-to-talk hotkey (Carbon) + on-device speech recognition
 scripts/         hand-run CLIs / smoke checks
 docs/            permissions.md and other docs
 scratch/         test sandbox (gitignored) — the ONLY place tests may write files
@@ -85,8 +91,8 @@ data/            SQLite DBs (gitignored)
   Done so far: agent-to-agent delegation (`agent.delegate`), @mentions, GUI picks and hand-offs;
   `orchestrator` (plans with `plan.update`, delegates to any agent, no desktop tools) and specialists
   `coder`, `security-auditor`, `job-hunter`, `notes-reader`. File attachments on tasks (`file.read`).
-  A.R.S.E.N.A.L Phase 1 (own learning layer) done; Phase 2 = its voice on a local model (Ollama),
-  Phase 3 = opt-in local fine-tuning (MLX, project-local venv; ask first).
+  A.R.S.E.N.A.L Phase 1 (own learning layer) and Phase 2 (its voice on local Ollama, `say`, push-to-talk)
+  done; Phase 3 = opt-in local fine-tuning (MLX, project-local venv; ask first).
 
 ## Commands
 - `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
@@ -132,6 +138,38 @@ data/            SQLite DBs (gitignored)
   `settings.desktop` hides it): its status is our own words (tasks running / suggestions / ready), it
   says "sending X" when routing and reacts when tasks end; clicking it asks "What should I do?" (live
   `decide` preview, Enter starts an `agent: "arsenal"` run; typing holds the desktop like reply boxes).
+
+## A.R.S.E.N.A.L voice invariants (Phase 2)
+- The voice only talks: `Voice` (voice.ts) explains a `decide()`, answers questions, recaps finished runs
+  (cached in kv `recap:<runId>`). No tools; it can't start tasks, apply suggestions or approve; its
+  output never feeds routing. Facts (incl. task texts / agent results) go in one
+  `<untrusted_data source="arsenal-facts">`; the user's question stays outside it. Ollama only
+  (`/api/chat`, the ollama connection's num_ctx so the model isn't reloaded, think off). Default model =
+  the biggest installed one ≤ 9.5 GB (qwen3.5:9b here); `settings.voiceModel` overrides. It remembers the
+  last 4 exchanges for 10 min (user's words + its answers, not old facts); `forget()` resets. Message
+  order is cache-friendly: [facts as data, "Got it.", …recent exchanges, new message]; the server pre-warms
+  it (`prewarm()`, two short requests, since Ollama's MLX runner checkpoints a prefix only once two
+  requests share it) 5 s after start and when facts change (30 s check): ~2 s answers vs ~12 s cold. Not ready
+  (Ollama down, model missing, voice off) → 503 with our own reason; everything else works as before.
+- UI labels its words "written by the AI · local <model>", plain text. Presence shows our words only
+  ("thinking", "speaking", "listening").
+- Speech engines: `speakEngine` "kokoro" (default; sentence by sentence, next one synthesized while the
+  current plays, WAVs in data/tts/ played with afplay and deleted) | "system" (`say`). Kokoro loads in the
+  background when it will be used; if it fails, speech falls back to `say` (status reports why).
+- Speaking: `settings.speak` = off | spoken (default: only when the user spoke, request has `spoken: true`)
+  | always; the request must also say `speak: true`. A spoken task gets our own "On it. Sending it to X.". `/usr/bin/say` via spawn, options as
+  args (voice name validated), text on stdin (`-f -`), ≤700 chars; never while the mic listens.
+- Push-to-talk (opt-in `settings.listen`): the overlay helper registers the hotkey (Carbon, no permission)
+  and recognises speech with `requiresOnDeviceRecognition` (refuses if unavailable), max 30s, only while
+  held. Protocol: helper → `pttDown`; server stops speech, then `{cmd:"listen"}`; `listenEnd` re-allows
+  speech. Settings reach it as `{cmd:"voice", listen, hotkey, locale}` (GuiServer.voiceBridge).
+  Transcripts go to the page only (DOM event `deskpilot-voice`). A spoken question (`looksLikeQuestion`)
+  is answered at once; a spoken task always waits for Start. Voice can never approve or deny.
+- Info.plist (usage descriptions) is embedded in the helper binary (`-sectcreate __info_plist`). macOS checks
+  privacy against the *responsible* app (Terminal/VS Code), which lacks the speech key and gets the helper
+  killed, so the helper re-launches itself disclaimed (`responsibility_spawnattrs_setdisclaim`,
+  disclaim.swift; env DESKPILOT_OVERLAY_DISCLAIMED) and the prompts name "overlay". Ad-hoc signed: a
+  rebuild may make macOS ask again.
 
 ## Interaction invariants
 - `Interaction` (src/agent/interaction.ts): the user's messages to a running task are queued and delivered

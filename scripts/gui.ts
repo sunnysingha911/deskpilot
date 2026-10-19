@@ -40,9 +40,12 @@ if (!noOpen) openPanel();
 
 let overlay: Overlay | undefined;
 if (!process.argv.includes("--no-overlay")) {
-  const o = startOverlay(gui.url, (route) => openPanel(route));
+  const o = startOverlay(gui.url, (route) => openPanel(route), gui.voiceBridge.events);
   if ("error" in o) console.log(`desktop avatars: ${o.error}`);
-  else overlay = o;
+  else {
+    overlay = o;
+    gui.voiceBridge.attach(o.send); // push-to-talk settings go to the helper
+  }
 }
 
 const shutdown = async () => {

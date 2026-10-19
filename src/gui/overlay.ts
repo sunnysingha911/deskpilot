@@ -13,6 +13,19 @@ const Position = z.object({ x: z.number(), y: z.number() });
 
 export interface Overlay {
   stop(): void;
+  /** A command for the helper (see native/overlay main.swift): voice settings, "listen", "cancel". */
+  send(cmd: OverlayCommand): void;
+}
+
+export type OverlayCommand = { cmd: "voice"; listen: boolean; hotkey: string; locale: string } | { cmd: "listen" } | { cmd: "cancel" };
+
+/** Push-to-talk events from the helper. */
+export interface OverlayVoiceEvents {
+  /** The user pressed push-to-talk: stop speaking, then send {cmd:"listen"}. */
+  pttDown?: () => void;
+  /** Listening ended (transcript delivered to the page, cancelled, or failed). */
+  listenEnd?: () => void;
+  voiceError?: (message: string) => void;
 }
 
 /**
@@ -20,7 +33,7 @@ export interface Overlay {
  * goes to the helper over stdin, never on its command line.
  */
 /** `onOpen` gets the control-panel route to show: "#/runs/<id>" or "#/arsenal". */
-export function startOverlay(panelUrl: string, onOpen: (route: string) => void): Overlay | { error: string } {
+export function startOverlay(panelUrl: string, onOpen: (route: string) => void, voice: OverlayVoiceEvents = {}): Overlay | { error: string } {
   if (process.platform !== "darwin") return { error: "the desktop overlay is macOS-only for now" };
   if (!existsSync(OVERLAY_PATH)) return { error: "overlay helper isn't built. Run: npm run build:native" };
 
@@ -35,7 +48,7 @@ export function startOverlay(panelUrl: string, onOpen: (route: string) => void):
   child.stdin!.write(JSON.stringify({ url: `${panelUrl}#/overlay`, origin, width: 640, height: 640, ...pos }) + "\n");
 
   createInterface({ input: child.stdout! }).on("line", (line) => {
-    let msg: { event?: string; runId?: unknown; x?: unknown; y?: unknown };
+    let msg: { event?: string; runId?: unknown; x?: unknown; y?: unknown; message?: unknown };
     try {
       msg = JSON.parse(line);
     } catch {
@@ -43,6 +56,9 @@ export function startOverlay(panelUrl: string, onOpen: (route: string) => void):
     }
     if (msg.event === "open" && typeof msg.runId === "string" && /^[\w-]{1,80}$/.test(msg.runId)) onOpen(`#/runs/${msg.runId}`);
     if (msg.event === "openArsenal") onOpen("#/arsenal");
+    if (msg.event === "pttDown") voice.pttDown?.();
+    if (msg.event === "listenEnd") voice.listenEnd?.();
+    if (msg.event === "voiceError") voice.voiceError?.(String(msg.message ?? "").slice(0, 300));
     if (msg.event === "moved") {
       const p = Position.safeParse(msg);
       if (p.success) {
@@ -51,8 +67,18 @@ export function startOverlay(panelUrl: string, onOpen: (route: string) => void):
       }
     }
   });
+  child.stdin!.on("error", () => {}); // the helper exited; stop() still works
+  let stopping = false;
+  child.on("exit", (code, signal) => {
+    if (!stopping && (code || signal))
+      console.log(`desktop avatars stopped unexpectedly (${signal ?? `exit ${code}`}); crash reports: ~/Library/Logs/DiagnosticReports/overlay-*.ips. Restart npm run gui.`);
+  });
   return {
+    send: (cmd) => {
+      if (child.stdin?.writable) child.stdin.write(JSON.stringify(cmd) + "\n");
+    },
     stop: () => {
+      stopping = true;
       child.stdin?.end(); // the helper quits when stdin closes
       setTimeout(() => child.kill(), 1000).unref();
     },

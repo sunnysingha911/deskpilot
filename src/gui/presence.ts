@@ -176,6 +176,20 @@ export class PresenceTracker {
     return true;
   }
 
+  /** End whatever the orb was saying (speaking, listening) and go back to its idle status now. */
+  homeDone(): void {
+    if (this.homeTimer) {
+      clearTimeout(this.homeTimer);
+      this.timers.delete(this.homeTimer);
+      this.homeTimer = null;
+    }
+    const a = this.avatars.get(HOME_KEY);
+    if (!a) return;
+    a.mood = this.homeMood();
+    a.status = this.homeIdle();
+    this.notify();
+  }
+
   /** Recompute the idle status (tasks or suggestions changed). */
   refreshHome(): void {
     const a = this.avatars.get(HOME_KEY);

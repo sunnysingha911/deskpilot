@@ -91,6 +91,16 @@ improvements (budgets, models) that you approve; each is tried on 5 tasks and un
 results get worse. It can't change tools, instructions or approval rules. On the desktop it appears as
 a glowing orb (choose its colour on its page).
 
+**Its voice.** With Ollama running (e.g. `qwen3.5:4b`), it can explain its picks in words ("Explain"),
+answer questions about what it has learned ("which agent is best at research?"), and recap finished
+tasks ("Recap" on a run's page). It runs on this Mac and only talks: it can't start tasks, change
+anything or approve actions. It speaks with a natural local voice (Kokoro-82M, downloaded once from Hugging Face into data/models;
+the macOS voice is the fallback), remembers the last few things you said so follow-ups work, and uses
+the biggest Ollama model that fits (e.g. `ollama pull qwen3.5:9b`). **Push to talk**:
+hold ⌥ Option + Space (or the orb's mic button) and speak. Questions are answered; tasks wait for you
+to press Start. Speech is recognised on this Mac only. macOS asks for Microphone and Speech
+Recognition access the first time (see docs/permissions.md).
+
 ## Talking with agents
 
 On the Run page (and a run's page) there's a chat box under the timeline: message an agent while it

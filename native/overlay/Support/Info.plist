@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.deskpilot.overlay</string>
+	<key>CFBundleName</key>
+	<string>deskpilot overlay</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A.R.S.E.N.A.L listens only while you hold its push-to-talk key, to hear your task.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>A.R.S.E.N.A.L turns what you say into text on this Mac (on-device only).</string>
+</dict>
+</plist>

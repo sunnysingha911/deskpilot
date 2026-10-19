@@ -11,8 +11,14 @@ import { Avatar } from "@/components/Avatar";
 import { Orb } from "@/components/Orb";
 import { api, get, presenceUrl } from "@/lib/api";
 import { playDust } from "@/lib/dust";
-import type { ArsenalDecision, PresenceAvatar, PresenceState, Priority, RunDetail } from "@/lib/types";
+import type { ArsenalDecision, ArsenalSaid, ArsenalVoiceStatus, PresenceAvatar, PresenceState, Priority, RunDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { looksLikeQuestion } from "../../../src/arsenal/intent.ts";
+
+/** Push-to-talk events from the native host (on-device speech recognition). */
+type VoiceEvent = { n: number } & ({ type: "listening" } | { type: "partial"; text: string } | { type: "final"; text: string } | { type: "error"; message: string } | { type: "idle" });
+
+const HOTKEY_LABEL: Record<string, string> = { "option+space": "⌥Space", "control+option+space": "⌃⌥Space", "command+shift+space": "⇧⌘Space" };
 
 /** Dust effect length; a bit shorter than the core's dissolveMs, so it ends before the avatar is removed. */
 const DUST_MS = 1500;
@@ -85,6 +91,8 @@ function ReplyBox({
   onText,
   sendLabel = "Send",
   closeOnSend = true,
+  initialText = "",
+  secondary,
   children,
 }: {
   placeholder: string;
@@ -94,10 +102,13 @@ function ReplyBox({
   sendLabel?: string;
   /** false: the parent swaps the box out itself after sending. */
   closeOnSend?: boolean;
+  initialText?: string;
+  /** A second button that also takes the text (e.g. "Ask"). */
+  secondary?: { label: string; onClick: (text: string) => Promise<void> };
   children?: ReactNode;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
-  const [text, setText] = useState("");
+  const [text, setText] = useState(initialText);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   // Runs once per open box: a new onClose each render must not re-take the keyboard.
@@ -158,6 +169,21 @@ function ReplyBox({
         <button type="button" className="ov-btn" onClick={onClose} onPointerDown={(e) => e.stopPropagation()}>
           Cancel
         </button>
+        {secondary && (
+          <button
+            type="button"
+            className="ov-btn"
+            disabled={!text.trim() || busy}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => {
+              if (!text.trim() || busy) return;
+              setBusy(true);
+              void secondary.onClick(text.trim()).finally(() => setBusy(false));
+            }}
+          >
+            {secondary.label}
+          </button>
+        )}
         <button type="button" className="ov-btn ov-primary" disabled={!text.trim() || busy} onClick={() => void send()} onPointerDown={(e) => e.stopPropagation()}>
           {sendLabel}
         </button>
@@ -166,13 +192,114 @@ function ReplyBox({
   );
 }
 
-/** A.R.S.E.N.A.L's bubble: give it a task (it shows who it would send, live), or open its page. */
-function ArsenalBubble({ a, align, onClose, react }: { a: PresenceAvatar; align: "left" | "right"; onClose: () => void; react: (r: Reaction) => void }) {
-  const [asking, setAsking] = useState(true);
+/** Hold to talk: the native host listens (on-device) only while this or the hotkey is held. */
+function TalkButton({ hotkey }: { hotkey: string }) {
+  const [held, setHeld] = useState(false);
+  const down = (e: PointerEvent) => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setHeld(true);
+    host({ type: "pttDown" });
+  };
+  const up = (e: PointerEvent) => {
+    e.stopPropagation();
+    if (!held) return;
+    setHeld(false);
+    host({ type: "pttUp" });
+  };
+  return (
+    <button type="button" className={cn("ov-btn ov-talk", held && "ov-talk-on")} onPointerDown={down} onPointerUp={up} onPointerCancel={up} title={`Hold and speak (or hold ${HOTKEY_LABEL[hotkey] ?? hotkey} anywhere)`}>
+      {held ? "listening…" : "🎙 Hold to talk"}
+    </button>
+  );
+}
+
+/** What the voice said: written by a local model, so labelled and shown as plain text. */
+function Answer({ said }: { said: ArsenalSaid }) {
+  return (
+    <div className="ov-answer">
+      <div className="ov-label">written by the AI · local {said.model}</div>
+      <div>{said.text}</div>
+    </div>
+  );
+}
+
+/**
+ * A.R.S.E.N.A.L's bubble: give it a task (typed or spoken; it shows who it would send, live), ask it a
+ * question (its voice answers), or open its page. A spoken task always waits for Start.
+ */
+function ArsenalBubble({ a, align, onClose, react, voiceEvent }: { a: PresenceAvatar; align: "left" | "right"; onClose: () => void; react: (r: Reaction) => void; voiceEvent: VoiceEvent | null }) {
+  const [phase, setPhase] = useState<"typing" | "listening" | "heard">(voiceEvent?.type === "listening" ? "listening" : "typing");
   const [task, setTask] = useState("");
+  const [heard, setHeard] = useState("");
   const [preview, setPreview] = useState<ArsenalDecision | null>(null);
+  const [said, setSaid] = useState<ArsenalSaid | null>(null);
+  const [thinking, setThinking] = useState(false);
   const [sent, setSent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [voice, setVoice] = useState<ArsenalVoiceStatus | null>(null);
+  // Only events from now on (and the "listening" that opened this bubble); never replay an old one.
+  const seen = useRef(voiceEvent ? (voiceEvent.type === "listening" ? voiceEvent.n - 1 : voiceEvent.n) : 0);
+
+  useEffect(() => {
+    void get<ArsenalVoiceStatus>("/api/arsenal/voice").then(setVoice).catch(() => setVoice(null));
+  }, []);
+
+  /** spoken: the user said it (push-to-talk), so the answer may be spoken back. */
+  const ask = async (question: string, spoken = false) => {
+    setError(null);
+    setSaid(null);
+    setThinking(true);
+    try {
+      setSaid(await api<ArsenalSaid>("POST", "/api/arsenal/ask", { question, speak: true, spoken }));
+      react("nod");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setThinking(false);
+    }
+  };
+  const start = async (text: string, spoken = false) => {
+    setError(null);
+    try {
+      const r = await api<{ runId: string; decision?: ArsenalDecision }>("POST", "/api/runs", { agent: "arsenal", task: text, spoken });
+      setSent(r.decision?.agent ?? "it");
+      react("cheer");
+      setTimeout(onClose, 2500);
+    } catch (e) {
+      setError((e as Error).message);
+      throw e;
+    }
+  };
+
+  // Push-to-talk: show the live transcript; when it's final, a question is answered right away and a
+  // task waits for Start (a misheard word must never start something by itself).
+  useEffect(() => {
+    if (!voiceEvent || voiceEvent.n <= seen.current) return;
+    seen.current = voiceEvent.n;
+    if (voiceEvent.type === "listening") {
+      setPhase("listening");
+      setHeard("");
+      setSaid(null);
+      setError(null);
+      setSent(null);
+    } else if (voiceEvent.type === "partial") {
+      setHeard(voiceEvent.text);
+    } else if (voiceEvent.type === "final") {
+      const text = voiceEvent.text.trim();
+      setHeard(text);
+      setPhase("heard");
+      setTask(text);
+      if (!text) setError("I didn't catch that. Hold and speak again.");
+      else if (looksLikeQuestion(text)) void ask(text, true);
+    } else if (voiceEvent.type === "error") {
+      setPhase((p) => (p === "listening" ? "heard" : p));
+      setError(voiceEvent.message);
+    } else if (voiceEvent.type === "idle") {
+      setPhase((p) => (p === "listening" ? "typing" : p));
+    }
+  }, [voiceEvent?.n]);
+
   useEffect(() => {
     if (task.trim().length < 4) return setPreview(null);
     const t = setTimeout(() => {
@@ -182,7 +309,18 @@ function ArsenalBubble({ a, align, onClose, react }: { a: PresenceAvatar; align:
     }, 350);
     return () => clearTimeout(t);
   }, [task]);
+
   const stop = (e: PointerEvent) => e.stopPropagation();
+  const previewView = preview && (
+    <div className="ov-preview">
+      → <b>{preview.agent}</b>
+      {preview.connection ? ` on ${preview.connection}` : ""} · {preview.mode} · {Math.round(preview.confidence * 100)}% sure
+      <div className="ov-preview-why">{preview.why[0]}</div>
+    </div>
+  );
+  const canAsk = !!voice?.ready;
+  const canTalk = !!voice?.listen && !!voice.pushToTalk;
+
   return (
     <div className={cn("ov-menu ov-arsenal", align === "right" ? "ov-menu-right" : "ov-menu-left")} data-hit onPointerDown={stop} onPointerUp={stop}>
       <div className="ov-menu-head">
@@ -191,42 +329,58 @@ function ArsenalBubble({ a, align, onClose, react }: { a: PresenceAvatar; align:
       </div>
       {sent ? (
         <div className="ov-note">Sent {sent}. It runs alongside your other tasks; I'll learn from how it goes.</div>
-      ) : asking ? (
+      ) : phase === "listening" ? (
+        <>
+          <div className="ov-label">Listening… let go when you're done</div>
+          <div className="ov-heard ov-heard-live">{heard || "…"}</div>
+        </>
+      ) : phase === "heard" ? (
+        <>
+          <div className="ov-label">You said</div>
+          <div className="ov-heard">{heard || "…"}</div>
+          {thinking && <div className="ov-note">thinking…</div>}
+          {said && <Answer said={said} />}
+          {heard && !said && !thinking && previewView}
+          {heard && (
+            <div className="ov-row">
+              <button type="button" className="ov-btn ov-primary" onClick={() => void start(heard, true).catch(() => {})}>
+                {said ? "Start as a task" : "Start"}
+              </button>
+              {!said && canAsk && (
+                <button type="button" className="ov-btn" onClick={() => void ask(heard, true)} disabled={thinking}>
+                  Ask instead
+                </button>
+              )}
+              <button type="button" className="ov-btn" onClick={() => setPhase("typing")}>
+                Edit
+              </button>
+            </div>
+          )}
+        </>
+      ) : (
         <>
           <div className="ov-label">What should I do?</div>
           <ReplyBox
-            placeholder="Describe a task… (Enter to start, Esc to close)"
+            placeholder="Describe a task, or ask me something… (Enter to start, Esc to close)"
             sendLabel="Start"
             closeOnSend={false}
+            initialText={heard}
             onText={setTask}
-            onClose={() => {
-              setAsking(false);
-              onClose();
-            }}
-            onSend={async (text) => {
-              setError(null);
-              try {
-                const r = await api<{ runId: string; decision?: ArsenalDecision }>("POST", "/api/runs", { agent: "arsenal", task: text });
-                setSent(r.decision?.agent ?? "it");
-                react("cheer");
-                setTimeout(onClose, 2500);
-              } catch (e) {
-                setError((e as Error).message);
-                throw e;
-              }
-            }}
+            onClose={onClose}
+            onSend={(t) => start(t)}
+            secondary={canAsk ? { label: "Ask", onClick: (t) => ask(t) } : undefined}
           >
-            {preview && (
-              <div className="ov-preview">
-                → <b>{preview.agent}</b>
-                {preview.connection ? ` on ${preview.connection}` : ""} · {preview.mode} · {Math.round(preview.confidence * 100)}% sure
-                <div className="ov-preview-why">{preview.why[0]}</div>
-              </div>
-            )}
+            {said ? <Answer said={said} /> : thinking ? <div className="ov-note">thinking…</div> : previewView}
           </ReplyBox>
         </>
-      ) : null}
+      )}
       <div className="ov-row">
+        {canTalk && phase !== "listening" && !sent && <TalkButton hotkey={voice!.hotkey} />}
+        {voice?.speaking && (
+          <button type="button" className="ov-btn" onClick={() => void api("POST", "/api/arsenal/speak/stop").catch(() => {})}>
+            Stop speaking
+          </button>
+        )}
         <button type="button" className="ov-btn" onClick={() => host({ type: "openArsenal" })}>
           Open A.R.S.E.N.A.L
         </button>
@@ -368,7 +522,7 @@ function ActionBubble({ a, align, onClose, react }: { a: PresenceAvatar; align: 
   );
 }
 
-function Slot({ a, open, onToggle }: { a: PresenceAvatar; open: boolean; onToggle: () => void }) {
+function Slot({ a, open, onToggle, voiceEvent }: { a: PresenceAvatar; open: boolean; onToggle: () => void; voiceEvent: VoiceEvent | null }) {
   const drag = useRef<{ x: number; y: number; moved: number } | null>(null);
   const svg = useRef<SVGSVGElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -467,13 +621,13 @@ function Slot({ a, open, onToggle }: { a: PresenceAvatar; open: boolean; onToggl
         setGaze(0);
       }}
     >
-      {open && solid && (a.key === "arsenal" ? <ArsenalBubble a={a} align={align} onClose={onToggle} react={react} /> : <ActionBubble a={a} align={align} onClose={onToggle} react={react} />)}
+      {open && solid && (a.key === "arsenal" ? <ArsenalBubble a={a} align={align} onClose={onToggle} react={react} voiceEvent={voiceEvent} /> : <ActionBubble a={a} align={align} onClose={onToggle} react={react} />)}
       {hover && !open && solid && (
         <div className={cn("ov-card", align === "right" ? "ov-menu-right" : "ov-menu-left")}>
           <b>{a.agent}</b>
           {a.task && <div className="ov-card-task">{a.task}</div>}
           <div className="ov-card-meta">{a.kind === "orb" ? a.status : `${a.status} · ${elapsed(a.startedAt)} · step ${a.steps} · ${a.outputTokens.toLocaleString()} tokens out`}</div>
-          <div className="ov-card-hint">{a.key === "arsenal" ? "click to give me a task · drag to move" : a.kind === "orb" ? "click to open the task · drag to move" : "click for actions · drag to move"}</div>
+          <div className="ov-card-hint">{a.key === "arsenal" ? "click to give me a task or ask me something · drag to move" : a.kind === "orb" ? "click to open the task · drag to move" : "click for actions · drag to move"}</div>
         </div>
       )}
       <div className="ov-bubble">{a.status}</div>
@@ -493,6 +647,20 @@ function Slot({ a, open, onToggle }: { a: PresenceAvatar; open: boolean; onToggl
 export function OverlayPage() {
   const [state, setState] = useState<PresenceState>({ avatars: [], hideForInput: false });
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const [voiceEvent, setVoiceEvent] = useState<VoiceEvent | null>(null);
+
+  // Push-to-talk from the native host: open A.R.S.E.N.A.L's bubble and pass the events along.
+  useEffect(() => {
+    let n = 0;
+    const on = (e: Event) => {
+      const d = (e as CustomEvent).detail as Omit<VoiceEvent, "n"> | undefined;
+      if (!d || typeof d !== "object" || typeof d.type !== "string") return;
+      setVoiceEvent({ ...d, n: ++n } as VoiceEvent);
+      if (d.type === "listening" || d.type === "error") setOpenKey("arsenal");
+    };
+    window.addEventListener("deskpilot-voice", on);
+    return () => window.removeEventListener("deskpilot-voice", on);
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay");
@@ -532,7 +700,7 @@ export function OverlayPage() {
   return (
     <div className={cn("ov-stage", state.hideForInput && "ov-hidden")}>
       {ordered.map((a) => (
-        <Slot key={a.key} a={a} open={openKey === a.key} onToggle={() => setOpenKey((k) => (k === a.key ? null : a.key))} />
+        <Slot key={a.key} a={a} open={openKey === a.key} onToggle={() => setOpenKey((k) => (k === a.key ? null : a.key))} voiceEvent={a.key === "arsenal" ? voiceEvent : null} />
       ))}
     </div>
   );

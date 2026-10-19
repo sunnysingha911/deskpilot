@@ -1,6 +1,6 @@
 // A.R.S.E.N.A.L: what it has learned, what it suggests, what it changed (with undo), and its settings.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, RotateCcw, Sparkles, X } from "lucide-react";
+import { Check, Mic, MessageCircle, RotateCcw, Sparkles, Volume2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/Layout";
 import { Orb } from "@/components/Orb";
@@ -12,7 +12,40 @@ import { Input, NativeSelect } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { api, get } from "@/lib/api";
 import { fmtNum, fmtTime } from "@/lib/format";
-import type { ArsenalChange, ArsenalDecision, ArsenalReport, ArsenalSettings, ArsenalSuggestion } from "@/lib/types";
+import type { ArsenalChange, ArsenalDecision, ArsenalReport, ArsenalSaid, ArsenalSettings, ArsenalSuggestion, ArsenalVoiceStatus } from "@/lib/types";
+
+const HOTKEY_LABEL: Record<string, string> = { "option+space": "⌥ Option + Space", "control+option+space": "⌃ Control + ⌥ Option + Space", "command+shift+space": "⇧ Shift + ⌘ Command + Space" };
+/** Languages with on-device recognition on recent Macs; "" = the system's. */
+const SPEECH_LOCALES = [
+  ["", "System language"],
+  ["en-IN", "English (India)"],
+  ["en-US", "English (US)"],
+  ["en-GB", "English (UK)"],
+  ["hi-IN", "Hindi"],
+  ["de-DE", "German"],
+  ["fr-FR", "French"],
+  ["es-ES", "Spanish"],
+];
+
+/** Kokoro voice ids → readable labels: af_heart → "Heart · American, female". */
+function kokoroLabel(id: string): string {
+  const [pre, name = id] = id.split("_");
+  const accent = { a: "American", b: "British" }[pre?.[0] ?? ""] ?? "";
+  const who = { f: "female", m: "male" }[pre?.[1] ?? ""] ?? "";
+  return `${name.charAt(0).toUpperCase()}${name.slice(1)} · ${[accent, who].filter(Boolean).join(", ")}`;
+}
+
+/** What the voice said: written by a local model, shown as plain text. */
+export function SaidView({ said }: { said: ArsenalSaid }) {
+  return (
+    <div className="mt-2 rounded-md border-l-2 border-primary bg-muted/60 px-3 py-2 text-sm">
+      <div className="mb-0.5 text-[11px] text-muted-foreground">
+        A.R.S.E.N.A.L · written by the AI (local {said.model}, {(said.ms / 1000).toFixed(1)}s)
+      </div>
+      {said.text}
+    </div>
+  );
+}
 
 const PRESETS = ["#ff8a1f", "#22d3ee", "#f43f5e", "#34d399", "#a78bfa", "#facc15"];
 const PATCHABLE = ["budget.maxSteps", "budget.maxOutputTokens", "budget.maxSeconds", "model.connection", "model.id"];
@@ -58,10 +91,25 @@ function SuggestionRow({ s, onAct }: { s: ArsenalSuggestion; onAct: (id: number,
   );
 }
 
-function TryIt({ color }: { color: string }) {
+function TryIt({ color, voiceReady }: { color: string; voiceReady: boolean }) {
   const [task, setTask] = useState("");
   const [d, setD] = useState<ArsenalDecision | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [said, setSaid] = useState<ArsenalSaid | null>(null);
+  const [busy, setBusy] = useState<"explain" | "ask" | null>(null);
+  const [question, setQuestion] = useState("");
+  const talk = async (kind: "explain" | "ask") => {
+    setBusy(kind);
+    setErr(null);
+    setSaid(null);
+    try {
+      setSaid(kind === "explain" ? await api<ArsenalSaid>("POST", "/api/arsenal/explain", { task, speak: true }) : await api<ArsenalSaid>("POST", "/api/arsenal/ask", { question, speak: true }));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
   useEffect(() => {
     if (task.trim().length < 4) return setD(null);
     const t = setTimeout(() => {
@@ -74,9 +122,30 @@ function TryIt({ color }: { color: string }) {
   return (
     <Card>
       <CardTitle className="mb-2">Ask how it would handle a task</CardTitle>
-      <Input id="arsenal-ask" value={task} onChange={(e) => setTask(e.target.value)} placeholder="e.g. find remote rust jobs in Berlin" />
-      {err && <p className="mt-2 text-xs text-bad">{err}</p>}
+      <div className="flex gap-2">
+        <Input id="arsenal-ask" value={task} onChange={(e) => (setTask(e.target.value), setSaid(null))} placeholder="e.g. find remote rust jobs in Berlin" />
+        {voiceReady && (
+          <Button variant="outline" disabled={task.trim().length < 4 || busy !== null} onClick={() => void talk("explain")}>
+            <MessageCircle /> {busy === "explain" ? "Thinking…" : "Explain"}
+          </Button>
+        )}
+      </div>
       {d && <DecisionView d={d} color={color} />}
+      <CardTitle className="mt-5 mb-2">Ask it something</CardTitle>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (question.trim() && voiceReady) void talk("ask");
+        }}
+      >
+        <Input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder={voiceReady ? "e.g. which agent is best at research? how did my last task go?" : "its voice isn't available (see Voice below)"} disabled={!voiceReady} />
+        <Button type="submit" variant="outline" disabled={!voiceReady || !question.trim() || busy !== null}>
+          {busy === "ask" ? "Thinking…" : "Ask"}
+        </Button>
+      </form>
+      {said && <SaidView said={said} />}
+      {err && <p className="mt-2 text-xs text-bad">{err}</p>}
     </Card>
   );
 }
@@ -108,6 +177,12 @@ export function ArsenalPage() {
   const qc = useQueryClient();
   const report = useQuery({ queryKey: ["arsenal"], queryFn: () => get<ArsenalReport>("/api/arsenal"), refetchInterval: 5000 });
   const [draft, setDraft] = useState<ArsenalSettings | null>(null);
+  const voice = useQuery({ queryKey: ["arsenal-voice"], queryFn: () => get<ArsenalVoiceStatus>("/api/arsenal/voice"), refetchInterval: 10_000 });
+  const sayVoices = useQuery({
+    queryKey: ["arsenal-say-voices"],
+    queryFn: () => get<{ system: Array<{ name: string; lang: string }>; natural: string[] }>("/api/arsenal/voices"),
+    staleTime: 60_000,
+  });
   useEffect(() => {
     if (report.data && !draft) setDraft(report.data.settings);
   }, [report.data, draft]);
@@ -125,7 +200,7 @@ export function ArsenalPage() {
   });
   const save = useMutation({
     mutationFn: (s: ArsenalSettings) => api<ArsenalSettings>("PUT", "/api/arsenal/settings", s),
-    onSuccess: (s) => (setDraft(s), toast("Saved"), refresh(), qc.invalidateQueries({ queryKey: ["arsenal-color"] })),
+    onSuccess: (s) => (setDraft(s), toast("Saved"), refresh(), qc.invalidateQueries({ queryKey: ["arsenal-color"] }), qc.invalidateQueries({ queryKey: ["arsenal-voice"] })),
     onError: (e) => toast((e as Error).message, true),
   });
 
@@ -188,7 +263,7 @@ export function ArsenalPage() {
             </details>
           )}
         </Card>
-        <TryIt color={draft.color} />
+        <TryIt color={draft.color} voiceReady={!!voice.data?.ready} />
       </div>
 
       <Card className="mt-4">
@@ -264,6 +339,122 @@ export function ArsenalPage() {
           ))}
         </Card>
       </div>
+
+      <Card className="mt-4">
+        <CardTitle className="mb-1 flex items-center gap-2">
+          <Volume2 className="size-4 text-primary" /> Voice
+          {voice.data &&
+            (voice.data.ready ? <Badge tone="ok">ready · {voice.data.model}</Badge> : <Badge tone="warn">{voice.data.enabled ? `not available: ${voice.data.reason}` : "off"}</Badge>)}
+        </CardTitle>
+        <p className="mb-3 text-xs text-muted-foreground">
+          It explains its picks, answers questions about what it has learned and recaps finished tasks, using a model on this Mac (Ollama). It only talks: it can't start tasks, change anything or approve actions. Its words are labelled as written by the AI.
+        </p>
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="Voice" hint="Off: it stays silent; routing and learning work the same">
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input type="checkbox" checked={draft.voice} onChange={(e) => setDraft({ ...draft, voice: e.target.checked })} className="size-4" />
+              Let A.R.S.E.N.A.L talk
+            </label>
+          </Field>
+          <Field label="Local model" hint="An Ollama model on this Mac">
+            <NativeSelect value={draft.voiceModel} onChange={(e) => setDraft({ ...draft, voiceModel: e.target.value })}>
+              <option value="">Default{voice.data?.model && !draft.voiceModel ? ` (${voice.data.model})` : ""}</option>
+              {(voice.data?.models ?? []).map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
+          <Field label="Speak aloud" hint={voice.data?.speakAvailable === false ? "Speaking is macOS-only for now" : "Says its answers out loud (macOS voices). Never while the mic is on."}>
+            <NativeSelect value={draft.speak} disabled={voice.data?.speakAvailable === false} onChange={(e) => setDraft({ ...draft, speak: e.target.value as ArsenalSettings["speak"] })}>
+              <option value="spoken">When you speak to it</option>
+              <option value="always">Always (typed questions too)</option>
+              <option value="off">Never</option>
+            </NativeSelect>
+          </Field>
+          <Field
+            label={`Speaking voice · ${draft.speakRate ? `${draft.speakRate} wpm` : "normal speed"}`}
+            hint={voice.data?.naturalVoiceError ? `Natural voice unavailable (using macOS voice): ${voice.data.naturalVoiceError}` : "Natural = Kokoro, a small voice model running on this Mac"}
+          >
+            <NativeSelect value={draft.speakEngine} onChange={(e) => setDraft({ ...draft, speakEngine: e.target.value as ArsenalSettings["speakEngine"] })} disabled={draft.speak === "off"}>
+              <option value="kokoro">Natural (Kokoro, local)</option>
+              <option value="system">macOS voice</option>
+            </NativeSelect>
+            {draft.speakEngine === "kokoro" ? (
+              <NativeSelect className="mt-2" value={draft.kokoroVoice} onChange={(e) => setDraft({ ...draft, kokoroVoice: e.target.value })} disabled={draft.speak === "off"}>
+                {(sayVoices.data?.natural.length ? sayVoices.data.natural : [draft.kokoroVoice]).map((v) => (
+                  <option key={v} value={v}>
+                    {kokoroLabel(v)}
+                  </option>
+                ))}
+              </NativeSelect>
+            ) : (
+              <NativeSelect className="mt-2" value={draft.speakVoice} onChange={(e) => setDraft({ ...draft, speakVoice: e.target.value })} disabled={draft.speak === "off"}>
+                <option value="">System voice</option>
+                {(sayVoices.data?.system ?? []).map((v) => (
+                  <option key={v.name} value={v.name}>
+                    {v.name} · {v.lang}
+                  </option>
+                ))}
+              </NativeSelect>
+            )}
+            <input type="range" min={0} max={300} step={10} value={draft.speakRate} disabled={draft.speak === "off"} onChange={(e) => setDraft({ ...draft, speakRate: Number(e.target.value) })} className="mt-2 w-full" aria-label="speaking speed" />
+          </Field>
+        </div>
+
+        <CardTitle className="mt-6 mb-1 flex items-center gap-2">
+          <Mic className="size-4 text-primary" /> Push to talk
+          {draft.listen && voice.data && !voice.data.pushToTalk && <Badge tone="warn">needs the desktop avatars (npm run gui)</Badge>}
+        </CardTitle>
+        <p className="mb-3 text-xs text-muted-foreground">
+          Hold the key (or the orb's mic button) and speak. Questions are answered; tasks wait for you to press Start. Speech is recognised on this Mac only and never sent anywhere. Voice can never approve or deny an action. The first time, macOS asks for Microphone and Speech Recognition access (see docs/permissions.md).
+        </p>
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="Listening">
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input type="checkbox" checked={draft.listen} onChange={(e) => setDraft({ ...draft, listen: e.target.checked })} className="size-4" />
+              Turn on push-to-talk
+            </label>
+          </Field>
+          <Field label="Hold this key" hint="Works in any app while held">
+            <NativeSelect value={draft.hotkey} onChange={(e) => setDraft({ ...draft, hotkey: e.target.value })} disabled={!draft.listen}>
+              {(voice.data?.hotkeys ?? ["option+space"]).map((h) => (
+                <option key={h} value={h}>
+                  {HOTKEY_LABEL[h] ?? h}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
+          <Field label="Language" hint="On-device recognition only">
+            <NativeSelect value={draft.speechLocale} onChange={(e) => setDraft({ ...draft, speechLocale: e.target.value })} disabled={!draft.listen}>
+              {SPEECH_LOCALES.map(([id, label]) => (
+                <option key={id} value={id}>
+                  {label}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button onClick={() => save.mutate(draft)} disabled={save.isPending}>
+            Save voice settings
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() =>
+              void api("POST", "/api/arsenal/speak/test")
+                .then(() => toast("Speaking (save first to hear new choices)"))
+                .catch((e) => toast((e as Error).message, true))
+            }
+          >
+            <Volume2 /> Test voice
+          </Button>
+          <Button variant="outline" onClick={() => void api("POST", "/api/arsenal/forget").then(() => toast("Started a fresh conversation"))}>
+            Forget the conversation
+          </Button>
+        </div>
+      </Card>
 
       <Card className="mt-4">
         <CardTitle className="mb-3">Settings</CardTitle>

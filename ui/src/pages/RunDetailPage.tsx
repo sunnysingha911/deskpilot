@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router";
 import { AttachmentList } from "@/components/Attachments";
 import { ChatBox } from "@/components/ChatBox";
 import { Rating } from "@/components/Rating";
+import { Recap } from "@/components/Recap";
 import { Timeline } from "@/components/Timeline";
 import { useToast } from "@/components/Toast";
 import { StatusBadge } from "@/components/ui/badge";
@@ -75,6 +76,7 @@ export function RunDetailPage() {
             {r.id} · started {fmtTime(r.started_at)}
           </p>
           {stream.done && r.relation !== "delegate" && <Rating runId={r.id} initial={d.rating} />}
+          {stream.done && r.relation !== "delegate" && <Recap runId={r.id} />}
         </div>
         {r.parent_run_id && (
           <p className="mt-2 text-sm">

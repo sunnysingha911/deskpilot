@@ -61,6 +61,27 @@ menu bar.
 Playwright drives its own bundled Chromium, so no Automation or Accessibility grant is needed. The
 first install downloads the browser to `~/Library/Caches/ms-playwright`. We'll ask before doing that.
 
+## 5. Microphone + Speech Recognition: only for A.R.S.E.N.A.L push-to-talk (optional)
+Needed only if you turn on **Push to talk** on the A.R.S.E.N.A.L page. The desktop overlay helper
+(`native/overlay`) listens while you hold the hotkey (default ⌥ Option + Space) or the orb's mic
+button, and turns speech into text **on this Mac** (it refuses rather than use Apple's servers).
+
+- **How it's granted:** the first time you hold the key, macOS asks twice: *"… would like to access
+  Speech Recognition"* and *"… would like to access the microphone"*. Click **Allow** both times.
+  The dialogs name **overlay** (the helper asks for itself, not for your terminal or VS Code).
+  After `npm run build:native` rebuilds it, macOS may ask again.
+- **Where to review/change:** System Settings → **Privacy & Security** → **Microphone**, and
+  → **Speech Recognition**. Turn **overlay** on.
+- **If you clicked "Don't Allow":** turn the toggles on at the paths above. If nothing is listed,
+  run `tccutil reset Microphone` and `tccutil reset SpeechRecognition` yourself (they reset those
+  decisions for all apps), then hold the key again.
+- **On-device language:** if the orb says on-device recognition isn't available for your language,
+  pick another one under A.R.S.E.N.A.L → Push to talk → Language (English India/US work on this Mac).
+- While it listens, macOS shows the orange microphone dot in the menu bar.
+- **Check:** `npm run gui`, turn on Push to talk, hold the key and say "how did my last task go?".
+
+Speaking answers aloud uses the built-in `say` command and needs no permission.
+
 ---
 
 ### Revoking

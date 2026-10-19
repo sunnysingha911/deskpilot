@@ -549,3 +549,13 @@ html.overlay body {
 .ov-preview-why { color: #9ca3af; font-size: 10.5px; margin-top: 1px; }
 .ov-menu-head b { white-space: nowrap; flex-shrink: 0; }
 .ov-menu-head span { min-width: 0; }
+
+/* A.R.S.E.N.A.L's voice on the desktop: what you said, its answer, hold-to-talk. */
+.ov-heard { margin: 3px 0 6px; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.06); color: #f3f4f6; font-size: 12.5px; }
+.ov-heard-live { color: #fde68a; animation: ov-heard-pulse 1.4s ease-in-out infinite; }
+@keyframes ov-heard-pulse { 50% { background: rgba(255, 138, 31, 0.14); } }
+.ov-answer { margin: 4px 0 6px; padding: 6px 8px; border-left: 2px solid #fb923c; background: rgba(251, 146, 60, 0.08); color: #f3f4f6; font-size: 12px; border-radius: 0 8px 8px 0; }
+.ov-answer .ov-label { margin-bottom: 2px; color: #fdba74; }
+.ov-talk { touch-action: none; }
+.ov-talk-on { background: #ea580c; border-color: #fb923c; color: #fff; }
+@media (prefers-reduced-motion: reduce) { .ov-heard-live { animation: none; } }

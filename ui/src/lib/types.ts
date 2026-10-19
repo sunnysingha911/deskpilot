@@ -183,6 +183,42 @@ export interface ArsenalSettings {
   exploration: number;
   /** Always show its orb on the desktop. */
   desktop: boolean;
+  voice: boolean;
+  voiceModel: string;
+  /** Speak answers aloud: never, when you spoke to it (push-to-talk), or always. */
+  speak: "off" | "spoken" | "always";
+  speakEngine: "kokoro" | "system";
+  kokoroVoice: string;
+  speakVoice: string;
+  speakRate: number;
+  listen: boolean;
+  hotkey: string;
+  speechLocale: string;
+}
+/** Its voice (a local Ollama model) and push-to-talk. */
+export interface ArsenalVoiceStatus {
+  enabled: boolean;
+  ready: boolean;
+  model: string | null;
+  models: string[];
+  reason?: string;
+  speakAvailable: boolean;
+  speaking: boolean;
+  engine: "kokoro" | "system";
+  /** The natural voice couldn't load (it uses macOS `say` meanwhile). */
+  naturalVoiceError: string | null;
+  listen: boolean;
+  hotkey: string;
+  hotkeys: string[];
+  /** The desktop overlay is running, so push-to-talk can work. */
+  pushToTalk: boolean;
+}
+/** Something the voice said (written by the local model). */
+export interface ArsenalSaid {
+  text: string;
+  model: string;
+  ms: number;
+  decision?: ArsenalDecision;
 }
 export interface ArsenalReport {
   name: string;

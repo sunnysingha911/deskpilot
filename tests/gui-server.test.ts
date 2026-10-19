@@ -9,6 +9,8 @@ import { AGENTS_DIR } from "../src/agent/definition.ts";
 import { ActionLogger } from "../src/core/logger.ts";
 import { DATA_DIR, ensureDir, SCRATCH_DIR } from "../src/core/paths.ts";
 import { startGuiServer, type GuiServer } from "../src/gui/server.ts";
+import { Speaker } from "../src/arsenal/speech.ts";
+import type { OverlayCommand } from "../src/gui/overlay.ts";
 
 const tmp = mkdtempSync(join(ensureDir(SCRATCH_DIR), "gui-test-"));
 process.env.DESKPILOT_UPLOADS_DIR = join(tmp, "uploads");
@@ -23,6 +25,29 @@ const MARKER = join(SCRATCH_DIR, "zz-gui-test-marker.txt");
 
 let gui: GuiServer;
 let base = "";
+/** The voice's fake local model: what it was asked, and whether Ollama is "up". */
+const voiceAsked: string[] = [];
+let voiceUp = true;
+/** A speaker that records instead of speaking. */
+class RecordingSpeaker extends Speaker {
+  said: string[] = [];
+  private quiet = false;
+  constructor() {
+    super({ sayPath: null, playerPath: null });
+  }
+  override get available() {
+    return true;
+  }
+  override setListening(on: boolean) {
+    this.quiet = on;
+  }
+  override speak(text: string) {
+    if (this.quiet) return false;
+    this.said.push(text);
+    return true;
+  }
+}
+const speaker = new RecordingSpeaker();
 let mockUrl = "";
 const mockReplies: object[] = [];
 /** Request bodies the mock model received. */
@@ -45,7 +70,19 @@ const mock = createServer((req, res) => {
 before(async () => {
   await new Promise<void>((r) => mock.listen(0, "127.0.0.1", r));
   mockUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/v1`;
-  gui = await startGuiServer({ port: 0, logger });
+  gui = await startGuiServer({
+    port: 0,
+    logger,
+    speaker,
+    voice: {
+      listModels: async () => {
+        if (!voiceUp) throw new Error("ECONNREFUSED");
+        return ["qwen3.5:4b"];
+      },
+      chat: async (req) => (voiceAsked.push(req.user), "I'm doing fine."),
+      prewarm: false,
+    },
+  });
   base = new URL(gui.url).origin;
   writeFileSync(MARKER, "must survive");
 });
@@ -585,5 +622,74 @@ describe("A.R.S.E.N.A.L through the GUI", () => {
       mockHandler = undefined;
       delete process.env.XAI_API_KEY;
     }
+  });
+});
+
+describe("A.R.S.E.N.A.L's voice and push-to-talk through the GUI", () => {
+  test("ask / explain / recap answer through the local model; speaking needs the setting and the request", async () => {
+    const st = await call("GET", "/api/arsenal/voice");
+    assert.equal(st.status, 200);
+    assert.deepEqual([st.body.ready, st.body.model, st.body.pushToTalk, st.body.listen], [true, "qwen3.5:4b", false, false]);
+
+    const ask = await call("POST", "/api/arsenal/ask", { question: "how am I doing?", speak: true });
+    assert.equal(ask.status, 200, JSON.stringify(ask.body));
+    assert.equal(ask.body.text, "I'm doing fine.");
+    assert.match(voiceAsked.at(-1)!, /The user says: how am I doing\?/);
+    assert.deepEqual(speaker.said, [], "by default it speaks only when you spoke to it");
+    await call("POST", "/api/arsenal/ask", { question: "said aloud", speak: true, spoken: true });
+    assert.deepEqual(speaker.said, ["I'm doing fine."], "a spoken question gets a spoken answer");
+
+    await call("PUT", "/api/arsenal/settings", { speak: "always" });
+    await call("POST", "/api/arsenal/ask", { question: "and now?" });
+    assert.equal(speaker.said.length, 1, "not asked to speak");
+    await call("POST", "/api/arsenal/ask", { question: "and now?", speak: true });
+    assert.equal(speaker.said.length, 2, "always: typed questions too");
+    await call("PUT", "/api/arsenal/settings", { speak: "off" });
+    await call("POST", "/api/arsenal/ask", { question: "said aloud", speak: true, spoken: true });
+    assert.equal(speaker.said.length, 2, "off: never");
+    assert.equal((await call("PUT", "/api/arsenal/settings", { speak: "loud" })).status, 400);
+    speaker.said.length = 0;
+
+    assert.equal((await call("POST", "/api/arsenal/ask", {})).status, 400);
+    assert.equal((await call("POST", "/api/arsenal/ask", { question: "x".repeat(3000) })).status, 400);
+    assert.equal((await call("POST", "/api/runs/no-such-run/recap", {})).status, 404);
+    assert.equal((await call("PUT", "/api/arsenal/settings", { hotkey: "f13" })).status, 400);
+
+    voiceUp = false;
+    try {
+      await call("GET", "/api/arsenal/voice"); // refresh the cached status
+      const down = await call("POST", "/api/arsenal/ask", { question: "hello?" });
+      assert.equal(down.status, 503);
+      assert.match(down.body.error, /Ollama isn't running/);
+    } finally {
+      voiceUp = true;
+      await call("GET", "/api/arsenal/voice");
+    }
+  });
+
+  test("push-to-talk: settings reach the helper; listening only when on, and speech stops first", async () => {
+    const sent: OverlayCommand[] = [];
+    gui.voiceBridge.attach((c) => sent.push(c));
+    assert.deepEqual(sent.at(-1), { cmd: "voice", listen: false, hotkey: "option+space", locale: "" });
+    assert.equal((await call("GET", "/api/arsenal/voice")).body.pushToTalk, true);
+
+    // Off: a press is refused.
+    gui.voiceBridge.events.pttDown!();
+    assert.deepEqual(sent.at(-1), { cmd: "cancel" });
+
+    await call("PUT", "/api/arsenal/settings", { listen: true, hotkey: "control+option+space", speechLocale: "en-IN", speak: "always" });
+    assert.deepEqual(sent.at(-1), { cmd: "voice", listen: true, hotkey: "control+option+space", locale: "en-IN" });
+    gui.voiceBridge.events.pttDown!();
+    assert.deepEqual(sent.at(-1), { cmd: "listen" });
+    // While the mic is on it never speaks (so it can't hear itself).
+    const before = speaker.said.length;
+    await call("POST", "/api/arsenal/ask", { question: "while listening?", speak: true });
+    assert.equal(speaker.said.length, before);
+    gui.voiceBridge.events.listenEnd!();
+    await call("POST", "/api/arsenal/ask", { question: "after?", speak: true });
+    assert.equal(speaker.said.length, before + 1);
+
+    await call("PUT", "/api/arsenal/settings", { listen: false, hotkey: "option+space", speechLocale: "", speak: "spoken" });
+    assert.deepEqual(sent.at(-1), { cmd: "voice", listen: false, hotkey: "option+space", locale: "" });
   });
 });

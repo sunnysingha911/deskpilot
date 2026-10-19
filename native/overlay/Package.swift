@@ -11,6 +11,12 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("WebKit"),
+                .linkedFramework("Speech"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("Carbon"),
+                // Usage descriptions for the Microphone / Speech Recognition prompts (push-to-talk),
+                // embedded in the binary since the helper isn't an .app bundle.
+                .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Support/Info.plist"]),
             ]
         )
     ]

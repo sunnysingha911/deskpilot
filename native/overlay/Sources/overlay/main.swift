@@ -4,6 +4,11 @@
 // Protocol: the first stdin line is JSON config {url, origin, x?, y?, width?, height?}. stdin closing
 // (the parent exited) quits the overlay. Events go to stdout as JSON lines:
 //   {"event":"ready"} · {"event":"open","runId":"…"} · {"event":"openArsenal"} · {"event":"moved","x":…,"y":…}
+//   {"event":"pttDown"} (push-to-talk pressed) · {"event":"listenEnd"} · {"event":"voiceError","message":"…"}
+// Further stdin lines are commands:
+//   {"cmd":"voice","listen":bool,"hotkey":"option+space","locale":"en-IN"} · {"cmd":"listen"} (go ahead
+//   after pttDown, once speech has stopped) · {"cmd":"cancel"}
+// Voice events reach the page as a "deskpilot-voice" DOM event: listening / partial / final / error / idle.
 //
 // The window never becomes main and never activates the app, so the frontmost app stays frontmost
 // (input.* tools depend on that). It becomes key only while the user types into an avatar's reply
@@ -48,6 +53,13 @@ final class Controller: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     var dragging = false
     /** App that had the keyboard before a reply box took it. */
     var previousApp: NSRunningApplication?
+    /** Push-to-talk: allowed (A.R.S.E.N.A.L's "listen" setting), and currently held. */
+    var listenEnabled = false
+    var pttHeld = false
+    lazy var listener = Listener(
+        onEvent: { [weak self] e in self?.voiceEvent(e) },
+        stillWanted: { [weak self] in self?.pttHeld ?? false }
+    )
 
     init(config: Config) {
         origin = config.origin
@@ -129,12 +141,72 @@ final class Controller: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             panel.resignKey()
             if let app = previousApp, !app.isTerminated { app.activate() }
             previousApp = nil
+        case "pttDown":
+            pttDown()
+        case "pttUp":
+            pttUp()
         case "openArsenal":
             emit(["event": "openArsenal"])
         case "open":
             if let runId = body["runId"] as? String, runId.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil {
                 emit(["event": "open", "runId": runId])
             }
+        default:
+            break
+        }
+    }
+
+    // ── push-to-talk ──
+
+    /** Pressed (hotkey or the orb's mic button): the parent stops any speech, then says "listen". */
+    func pttDown() {
+        guard !pttHeld else { return }
+        guard listenEnabled else {
+            return toPage(["type": "error", "message": "Listening is off. Turn it on in A.R.S.E.N.A.L's settings."])
+        }
+        pttHeld = true
+        emit(["event": "pttDown"])
+    }
+
+    func pttUp() {
+        guard pttHeld else { return }
+        pttHeld = false
+        listener.stop()
+    }
+
+    func voiceEvent(_ e: [String: Any]) {
+        toPage(e)
+        switch e["type"] as? String {
+        case "final", "idle": emit(["event": "listenEnd"])
+        case "error":
+            pttHeld = false
+            emit(["event": "voiceError", "message": e["message"] ?? ""])
+            emit(["event": "listenEnd"])
+        default: break
+        }
+    }
+
+    /** Hand a voice event to the page (JSON is a valid JS literal). */
+    func toPage(_ e: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: e), let json = String(data: data, encoding: .utf8) else { return }
+        web.evaluateJavaScript("window.dispatchEvent(new CustomEvent('deskpilot-voice', { detail: \(json) }))", completionHandler: nil)
+    }
+
+    func command(_ c: [String: Any]) {
+        switch c["cmd"] as? String {
+        case "voice":
+            listenEnabled = c["listen"] as? Bool ?? false
+            listener.locale = c["locale"] as? String ?? ""
+            let spec = listenEnabled ? (c["hotkey"] as? String ?? "option+space") : nil
+            if !setHotKey(spec, down: { [weak self] in self?.pttDown() }, up: { [weak self] in self?.pttUp() }) {
+                emit(["event": "voiceError", "message": "couldn't register the hotkey \(spec ?? "")"])
+            }
+            if !listenEnabled { pttHeld = false; listener.cancel() }
+        case "listen":
+            if pttHeld { listener.start() } else { emit(["event": "listenEnd"]) }
+        case "cancel":
+            pttHeld = false
+            listener.cancel()
         default:
             break
         }
@@ -151,6 +223,8 @@ final class Controller: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 }
 
+relaunchDisclaimedIfNeeded() // own responsible process, so macOS asks about "overlay" itself
+
 guard let line = readLine(), let data = line.data(using: .utf8), let config = try? JSONDecoder().decode(Config.self, from: data) else {
     FileHandle.standardError.write("overlay: expected a JSON config line on stdin\n".data(using: .utf8)!)
     exit(2)
@@ -160,9 +234,12 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory) // no Dock icon, never steals focus
 let controller = Controller(config: config)
 
-// Quit when the parent closes our stdin.
+// Commands from the parent; quit when it closes our stdin.
 Thread {
-    while readLine() != nil {}
+    while let line = readLine() {
+        guard let data = line.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+        DispatchQueue.main.async { controller.command(obj) }
+    }
     DispatchQueue.main.async { NSApp.terminate(nil) }
 }.start()
 
