@@ -26,7 +26,7 @@ browser, use keyboard and mouse. Later, an orchestrator agent delegates tasks to
    Accessibility API (AXUIElement) → browser DOM via Playwright → screenshots + raw
    mouse/keyboard events (last resort).
 2. **One working agent before many agents.**
-3. **Safety and logging from the start.** Every tool call is logged (SQLite). Every action is
+3. **Safety and logging from the start.** Every tool call is logged (Postgres). Every action is
    classified `read_only` | `reversible` | `irreversible`. Irreversible actions (delete, send,
    purchase, submit) require explicit user approval.
 4. **All on-screen, web and file content is untrusted data, never instructions.** Tool output
@@ -36,52 +36,56 @@ browser, use keyboard and mouse. Later, an orchestrator agent delegates tasks to
    budget, approval rules.
 
 ## Stack
-- TypeScript on Node ≥ 24 (ESM, strict), run with `tsx`.
-- Natural voice: `kokoro-js` (Kokoro-82M, Apache-2.0; ONNX via transformers.js) for A.R.S.E.N.A.L's speech:
-  the only runtime dep beyond the SDK/playwright/zod, justified by on-device, cross-OS natural TTS. Model
-  (~90 MB, q8) cached in data/models (`env.cacheDir`), never ~/.cache. Its `sharp` dep has advisories but
-  never sees untrusted input (we only synthesize our own text).
-- LLM providers via own adapters (Phase 2+): `@anthropic-ai/sdk` + plain fetch for OpenAI-compatible APIs. API keys from env vars only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …); never committed or hardcoded.
-- Small Swift CLI helper (`native/axhelper`) for the Accessibility API, emits JSON.
-- Playwright (`playwright-core`, no bundled browser) drives a dedicated instance of the installed
+**Cutover done (2026-10-21):** the backend is Python only; the TypeScript backend was removed (it's in git history,
+last at d330707). Node is used only to build the web app. See docs/architecture/migration-plan.md and docs/adr/.
+- Backend: Python 3.14 via uv (`backend/`), FastAPI + uvicorn, SQLAlchemy (async) + Alembic on Postgres 17 in Docker
+  (`compose.yaml`). A native desktop runner (`deskpilot runner start`) runs everything that needs the computer.
+- LLM providers via own adapters: the official `anthropic` SDK + plain httpx for OpenAI-compatible APIs and Ollama.
+  API keys from env vars only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …); never committed or hardcoded.
+- Natural voice: Kokoro-82M (Apache-2.0) through our own thin adapter (arsenal/kokoro.py): onnxruntime + espeak-ng
+  (`espeakng-loader`) + numpy, in the `runner` extra. Model (~90 MB, q8) and voices in data/models, never ~/.cache.
+  Only our own text is synthesized.
+- Small Swift helpers: `native/axhelper` (Accessibility API, JSON) and `native/overlay` (desktop avatars, push-to-talk).
+- Playwright for Python (`runner` extra, no bundled browser) drives a dedicated instance of the installed
   Brave/Chrome over CDP on 127.0.0.1:9333 with an isolated profile in `data/browser-profile`.
-- SQLite via built-in `node:sqlite` for logs and memory. Tests via built-in `node:test`.
+- Web app: React 19 + TypeScript + Vite (devDependencies only, bundled to ui/dist). Tests: pytest.
 
 ## Layout
 ```
-src/core/        tool definition, executor (validate → classify → approve → run → log), logger, risk
-src/tools/       one file per tool family; index.ts = registry filtered by OS
-src/platform/    DesktopBackend interface (types.ts) + per-OS backends (macos.ts)
-src/llm/         ModelProvider interface (types.ts) + adapters (anthropic.ts, openai-compatible.ts, ollama.ts)
-src/agent/       agent definition schema, system prompt + untrusted framing, the run loop,
-                 delegate.ts (agent-to-agent hand-offs)
+backend/src/deskpilot/
+  core/          tool definition, executor (validate → classify → approve → run → log), logger, risk, desktop lock
+  tools/         one file per tool family; registry.py = tools filtered by OS (machine vs control-plane tools)
+  platform/      DesktopBackend interface (types.py) + per-OS backends (macos.py), refs, overlay.py (avatar host)
+  llm/           ModelProvider interface (types.py) + adapters (anthropic, openai_compatible, ollama), connections
+  agent/         agent schema, system prompt + untrusted framing, the run loop, delegate.py, interaction.py, cli.py
+  arsenal/       A.R.S.E.N.A.L: text (TF-IDF), store, brain, voice, speech, kokoro, desk (speech + push-to-talk)
+  api/           FastAPI app, security, routes, runs (RunManager), presence, arsenal, speech, desktop, views
+  runner/        protocol, gate, policy, keys, pairing, hub, client, remote, cli
+  db/            SQLAlchemy models, sessions, import_sqlite (old data/*.db)
+  cli.py · devtools.py (logs, tokens, demos) · gui.py (gui, dev-ui)
+backend/migrations/  Alembic · backend/tests/{unit,integration,contract}
 agents/          agent definitions as JSON (data, not code)
-src/gui/         control panel backend: server.ts (localhost API + SSE, serves ui/dist), runs.ts
-                 (run manager, GUI approvals, provider fallback)
 ui/              control panel frontend: React 19 + TS + Vite + Tailwind 4 + shadcn-style components
                  (ui/src/components/ui), React Router (hash routing), TanStack Query, react-hook-form.
+                 ui/src/lib/schema.ts = the web app's copy of the agent schema (zod; kept equal to the backend's
+                 by tests/unit/test_ui_parity.py); ui/src/lib/intent.ts = question vs task (the orb).
                  Builds to static ui/dist (gitignored) so Electron/Tauri can load it later.
-src/arsenal/     A.R.S.E.N.A.L: deskpilot's own learning layer (no AI provider): text.ts (TF-IDF), store.ts
-                 (data/arsenal.db), brain.ts (router, provider picker, suggestions, trials, undo, notes),
-                 voice.ts (its words, local Ollama), speech.ts (`say`), intent.ts (question vs task, browser-safe)
-src/agent/schema.ts  browser-safe zod agent schema shared by core, CLI and UI
-src/llm/connections.ts  named provider connections, data/settings.json, write-only key storage in .env
 native/axhelper/ Swift package for AX API (+ `pdf-text` via PDFKit)
 native/overlay/  Swift package: transparent always-on-top window hosting the avatars page (#/overlay);
                  voice.swift = push-to-talk hotkey (Carbon) + on-device speech recognition
-scripts/         hand-run CLIs / smoke checks
-docs/            permissions.md and other docs
+docs/            permissions.md; docs/adr/ architecture decisions; docs/architecture/ runner protocol, migration plan
 scratch/         test sandbox (gitignored) — the ONLY place tests may write files
-data/            SQLite DBs (gitignored)
+data/            local data (gitignored): settings.json, uploads, models, runner config/policy/audit, old SQLite
+compose.yaml     Docker: postgres 17 + api (127.0.0.1 only); DESKPILOT_DB_PASSWORD in .env
 ```
 
 ## Phase plan
-- **Phase 0 — Setup.** Repo, config, docs, permissions guide. Done: script reads frontmost app name via AppleScript (`npm run frontmost`).
+- **Phase 0 — Setup.** Repo, config, docs, permissions guide. Done: reads the frontmost app's name via AppleScript (`deskpilot frontmost`).
 - **Phase 1 — Tool layer (no LLM), macOS backend, OS-neutral design.** `shell.run` (timeout +
   output cap), `applescript.run` (macOS-only), `ui.dump_tree` / `ui.press` / `ui.set_value`
   (Swift helper), `input.type` / `input.hotkey` / `input.click` (Quartz events), `browser.*`
   (open, snapshot, click, fill; Playwright), `screenshot` (built, not wired to agents). Central
-  SQLite action logger (records `os`) and risk classification per tool.
+  action logger (records `os`) and risk classification per tool.
   Done: dump Notes' UI tree and set a text field's value from a script.
 - **Phase 2 — Single-agent loop.** One agent defined as data, `ModelProvider` interface with
   `anthropic` + `openai-compatible` adapters, approval gate for irreversible actions,
@@ -93,14 +97,59 @@ data/            SQLite DBs (gitignored)
   `coder`, `security-auditor`, `job-hunter`, `notes-reader`. File attachments on tasks (`file.read`).
   A.R.S.E.N.A.L Phase 1 (own learning layer) and Phase 2 (its voice on local Ollama, `say`, push-to-talk)
   done; Phase 3 = opt-in local fine-tuning (MLX, project-local venv; ask first).
+- **Backend port to Python** (docs/architecture/migration-plan.md): Phases 0–4 and the cutover (Phase 5) done
+  2026-10-21; next: Phase 6 (frontend packages for many clients), Phase 7 (mobile).
 
 ## Commands
-- `npm run tool -- list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
-- `npm run agent -- <agent> "<task>" --file <path>` attaches files (repeatable); `--mode optimized|parallel`,
-  `--priority high|normal|low`
-- `npm run gui` (build UI + open window + desktop avatars; `-- --no-overlay` to skip them) · `npm run dev:ui` (Vite dev with reload) · `npm run build:ui` · `npm run agent -- <agent> "<task>"` (needs a key in `.env`)
-- `npm run tokens [-- --replay]` (token usage per agent; replay compares old vs new formatting)
-- `npm run logs -- [n]`, `npm test`, `npm run typecheck`, `npm run build:native`, `npm run notes-demo`
+`deskpilot …` = `uv run deskpilot …` in backend/ (or `uv run --project backend deskpilot …` from the repo root); the
+`npm run <name>` aliases call the same commands.
+- Native, one process: `npm run gui` (build UI + `deskpilot gui`: API with local tools, window, avatars, speech;
+  `--no-overlay`, `--no-open`, `--port`) · `npm run dev:ui` (API + Vite with reload) · `npm run build:ui` · `npm run typecheck`
+- Docker: `docker compose up -d`, then `deskpilot runner pair|start [--no-overlay] [--no-speech]|pause|resume|status`,
+  `docker compose exec api deskpilot runner code|list|approve|revoke`, `deskpilot open`
+- `deskpilot tool list | schema <tool> | <tool> '<json>' [--approve] [--raw field]`
+- `deskpilot agent <agent> "<task>" --file <path>` (repeatable) `--mode optimized|parallel --priority high|normal|low`
+- `deskpilot logs [n]`, `tokens [--replay]`, `frontmost`, `notes-demo`, `input-demo`, `serve [--reload]`,
+  `db upgrade|import-sqlite`, `npm run build:native`
+- Tests: `cd backend && uv run pytest` (unit + integration + contract; needs Postgres), `uv run ruff check . && uv run pyright`
+
+## Backend invariants (Python)
+- Python 3.14 via uv (`backend/.venv`, `uv.lock`); ruff + pyright strict + pytest must be clean.
+- Postgres only through SQLAlchemy models + Alembic migrations (never create_all); JSONB + timestamptz.
+  Tests use the `deskpilot_test` database (fixtures refuse `deskpilot`); test files only under scratch/.
+- Secrets only from env (`DESKPILOT_DB_PASSWORD`, provider keys); Settings uses SecretStr; never log the DSN.
+- Containers can't touch the desktop: anything needing macOS (tools, overlay, mic, speech, MLX) belongs to the
+  native runner (ADR 0003), never the API container. The runner executes only approved, signed calls.
+- `backend/tests/contract` = the HTTP behaviour the web app relies on; it starts FastAPI with a clean test database
+  (tests/contract/python_server.py). API changes that break it break the web app.
+- Tools keep the web app's wire shape: models extend `ToolModel` (snake_case in Python, camelCase JSON + schemas);
+  element models extend `Sparse` (unset fields omitted). Machine tools: `deskpilot.tools.registry.machine_tools()`;
+  CP stand-ins: `runner.remote.remote_tool` (classify + run via the hub; executor pipeline unchanged).
+- Runner code: `runner/{protocol,gate,policy,keys,pairing,hub,client,remote,cli}.py`. Every §6 refusal has a unit test and
+  was mutation-checked; the local policy (data/runner/policy.toml) is reloaded live and fails closed. Playwright is the
+  `runner` extra (not in the API image). The CP signing key lives in the `cpdata` volume: never delete it (runners pin it).
+- Phase 2 (done): `llm/` (anthropic on the official async SDK with fallbacks/context editing/effort; openai_compatible and
+  ollama over httpx), `agent/` (schema = same agent JSON; runner = the loop, events as camelCase dicts, all persisted;
+  delegate, interaction, prompt), CP tools plan.update / result.more / file.read. file.read extracts text cross-platform
+  (pypdf, docx/odt XML, HTML/RTF stdlib) because it runs in the Linux container. `default_look` matches the web app's (ui/src/lib/schema.ts) bit for bit (test_ui_parity).
+  One-value enums must stay JSON-schema `enum` (core.tool.enum_field). `Sparse.KEEP_NULLS` keeps fields the web app expects even when null.
+  Line length 140; prompt/description text files are exempt (wrapping would change model-facing text).
+- Phase 3 (done): `api/` = app (create_app / create_secure_app), security.py (pure ASGI: Host, Origin, token, CSP; public:
+  health, runners/pair, runners/ws), routes.py (the contract's paths/messages; /api and /api/v1), runs.py
+  (RunManager), presence.py, desktop.py (quiet/hold: local lock or the runner via hub.desktop), views.py (rows in the
+  web app's shape: *_json text, ISO "Z"). DESKPILOT_TOOL_MODE=runner (Docker: tools via the most recently connected runner)
+  | local (native dev/tests). UI token from .env (DESKPILOT_UI_TOKEN), `uv run deskpilot open` opens the panel.
+  Contract: `uv run pytest -m contract`. Verified live: Docker API + native
+  runner + host Ollama ran mac-helper-ollama → ui.list_apps on the Mac → answer.
+- Phase 4 (done): `arsenal/` = text, store (Postgres arsenal_* tables, all loaded in memory at start, write-through),
+  brain, voice (Ollama via llm.ollama; VoiceUnavailableError → 503), speech (Speaker: `say`/`afplay`, Synth), kokoro.py
+  (own thin Kokoro-82M adapter: kokoro-js's normalization + espeak-ng IPA via ctypes from espeakng-loader + tokenizer.json
+  + onnxruntime; same model files in data/models; `runner` extra: onnxruntime, espeakng-loader, numpy; kokoro-onnx itself
+  caps Python < 3.14), desk.py (VoiceDesk = speaker + overlay push-to-talk, re-validates every option). Speech goes
+  through `api/speech.py` SpeechPort: VoiceDesk in-process (local mode, `deskpilot gui`) or RemoteSpeech (Docker: signed
+  `voice` messages to the runner, its `event`s back drive the orb; config re-sent on connect). platform/overlay.py launches
+  native/overlay (token over stdin). `api/arsenal.py` = ArsenalHost + routes. `runner start [--no-overlay] [--no-speech]`
+  hosts the overlay/speech; the overlay loads the CP's #/overlay with DESKPILOT_UI_TOKEN.
 
 ## Agent loop invariants
 - Provider adapters keep native history append-only (never edit earlier turns; keep thinking blocks).
@@ -140,7 +189,7 @@ data/            SQLite DBs (gitignored)
   `decide` preview, Enter starts an `agent: "arsenal"` run; typing holds the desktop like reply boxes).
 
 ## A.R.S.E.N.A.L voice invariants (Phase 2)
-- The voice only talks: `Voice` (voice.ts) explains a `decide()`, answers questions, recaps finished runs
+- The voice only talks: `Voice` (arsenal/voice.py) explains a `decide()`, answers questions, recaps finished runs
   (cached in kv `recap:<runId>`). No tools; it can't start tasks, apply suggestions or approve; its
   output never feeds routing. Facts (incl. task texts / agent results) go in one
   `<untrusted_data source="arsenal-facts">`; the user's question stays outside it. Ollama only
@@ -149,7 +198,9 @@ data/            SQLite DBs (gitignored)
   last 4 exchanges for 10 min (user's words + its answers, not old facts); `forget()` resets. Message
   order is cache-friendly: [facts as data, "Got it.", …recent exchanges, new message]; the server pre-warms
   it (`prewarm()`, two short requests, since Ollama's MLX runner checkpoints a prefix only once two
-  requests share it) 5 s after start and when facts change (30 s check): ~2 s answers vs ~12 s cold. Not ready
+  requests share it) 5 s after start and when facts change (30 s check): ~2 s answers vs ~12 s cold. Pre-warming is skipped while
+  Ollama holds another model (`/api/ps`); `keep_alive` is 5m (llm/ollama.py KEEP_ALIVE). Two resident models (9b voice +
+  4b agent) plus Docker swapped this 16 GB Mac until it froze (2026-10-21). Not ready
   (Ollama down, model missing, voice off) → 503 with our own reason; everything else works as before.
 - UI labels its words "written by the AI · local <model>", plain text. Presence shows our words only
   ("thinking", "speaking", "listening").
@@ -172,7 +223,7 @@ data/            SQLite DBs (gitignored)
   rebuild may make macOS ask again.
 
 ## Interaction invariants
-- `Interaction` (src/agent/interaction.ts): the user's messages to a running task are queued and delivered
+- `Interaction` (agent/interaction.py): the user's messages to a running task are queued and delivered
   with the next tool results (`TurnInput.tool_results.note`) or, if it just finished, as a new user turn;
   only the top-level run takes messages. `ask_user` (per run, read-only, answer is the user's words)
   waits for an answer (timeout → null + "carry on"); called agents may ask too. Waits are excluded from
@@ -186,11 +237,11 @@ data/            SQLite DBs (gitignored)
   1.5s (`DesktopLock.quietFor`), so an agent's own click can't approve; denying is always allowed.
 
 ## Parallel task invariants
-- A task = a top-level run + its delegations/fallbacks; `TaskInfo {id, mode, priority()}` (src/core/task.ts)
+- A task = a top-level run + its delegations/fallbacks; `TaskInfo {id, mode, priority()}` (core/task.py)
   flows through RunDeps → ToolContext. Mode: `optimized` (default) | `parallel`; priority high|normal|low,
   changeable while running (`POST /api/runs/:id/priority`). `/api/meta.activeRuns` lists running tasks.
 - Tools with `desktop: true` (input.*, ui.press, ui.set_value, applescript.run) run one at a time through
-  `DesktopLock` (src/core/desktop-lock.ts), across processes too via `data/desktop.lock` (pid; a dead
+  `DesktopLock` (core/desktop_lock.py), across processes too via `data/desktop.lock` (pid; a dead
   holder's lock is taken over). Optimized tasks keep a lease (LEASE_MS 5s, capped by MAX_STRETCH_MS 30s
   while others wait; a higher priority may take over); waiters go by priority (optimized only), then
   arrival. Parallel tasks hold nothing between actions. Everything else runs concurrently.
@@ -208,10 +259,10 @@ data/            SQLite DBs (gitignored)
   Anthropic: server-side context editing (`clear_tool_uses_20250919`, our history untouched). OpenAI/Ollama:
   `pruneStale` on the adapter's history before each request. `RunDeps.prune: false` turns it off.
   Pruning breaks the prompt cache once per batch: it pays off on long runs, roughly neutral on short ones.
-- Accessibility trees render with short refs (`u12`, `src/platform/refs.ts`, app-checked) instead of
+- Accessibility trees render with short refs (`u12`, `platform/refs.py`, app-checked) instead of
   paths, roles without "AX", no `_NS:` ids. Snapshots drop redundant `[cursor=pointer]`, unnamed wrappers
   and the page's own origin. OpenAI requests carry `prompt_cache_key` (agent name).
-- Each run emits a `savings` event (estimates, chars/4); `npm run tokens [-- --replay]` reports usage.
+- Each run emits a `savings` event (estimates, chars/4); `deskpilot tokens [--replay]` reports usage.
 
 ## Delegation invariants
 - `agent.delegate` exists only for a run whose agent may call someone: `canDelegateTo`, plus user picks
@@ -235,7 +286,7 @@ data/            SQLite DBs (gitignored)
 ## Desktop avatar invariants
 - Agents' looks are data (`avatar` in the agent file; else `defaultLook(name)`), drawn once as SVG in
   `ui/src/components/Avatar.tsx` and used by both the control panel and the overlay.
-- `src/gui/presence.ts` maps run events to mood + status. Status lines are our own words (tool/agent
+- `api/presence.py` maps run events to mood + status. Status lines are our own words (tool/agent
   names, capped at 40 chars), never model output. Feed: `/api/presence` (SSE, token required).
 - The overlay never becomes main and never activates (input.* needs the target app frontmost). It becomes
   key only while the user types in an avatar's reply box: the page first takes the desktop lock as the
@@ -248,7 +299,7 @@ data/            SQLite DBs (gitignored)
   that fails). Looks are original stylized game-hero designs: outfit, back gear, headgear, glow colour.
 
 ## Attachment invariants
-- Attached files are copies in `data/uploads/<setId>/` (`src/core/attachments.ts`); names are reduced to a
+- Attached files are copies in `data/uploads/<setId>/` (`core/attachments.py`); names are reduced to a
   safe basename; ≤10 files × 25 MB. Uploads: `POST /api/uploads?name=&set=` (raw body, token required),
   `DELETE /api/uploads/<set>/<name>`; downloads only as `application/octet-stream` + attachment.
   `runs.attachments` holds the set id. Tests set `DESKPILOT_UPLOADS_DIR` into scratch/.

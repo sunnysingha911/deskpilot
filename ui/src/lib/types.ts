@@ -1,5 +1,5 @@
 // Shapes returned by the core server's /api endpoints.
-import type { AgentDefinition, AvatarLook } from "../../../src/agent/schema.ts";
+import type { AgentDefinition, AvatarLook } from "@/lib/schema.ts";
 import type { Mood } from "@/components/Avatar";
 
 export type { AgentDefinition, AvatarLook };

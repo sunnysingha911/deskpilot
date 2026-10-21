@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, Forward, Play, Plus, Square, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { parseMentions } from "../../../src/agent/schema.ts";
+import { parseMentions } from "@/lib/schema.ts";
 import { AttachmentPicker, NO_ATTACHMENTS, type AttachmentState } from "@/components/Attachments";
 import { ChatBox } from "@/components/ChatBox";
 import { Rating } from "@/components/Rating";

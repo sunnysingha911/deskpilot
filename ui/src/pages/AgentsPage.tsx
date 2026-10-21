@@ -1,4 +1,4 @@
-import { defaultLook } from "../../../src/agent/schema.ts";
+import { defaultLook } from "@/lib/schema.ts";
 import { Avatar } from "@/components/Avatar";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, Pencil, Plus, Trash2 } from "lucide-react";

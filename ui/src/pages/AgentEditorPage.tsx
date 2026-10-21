@@ -3,7 +3,7 @@ import { MonitorUp, RefreshCw, Save, Shuffle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link, useNavigate, useParams } from "react-router";
-import { ACCESSORIES, AgentDefinition, type AvatarLook, BACK_ITEMS, defaultLook, HAIR_STYLES, matchesPattern, OUTFITS, SKIN_TONES } from "../../../src/agent/schema.ts";
+import { ACCESSORIES, AgentDefinition, type AvatarLook, BACK_ITEMS, defaultLook, HAIR_STYLES, matchesPattern, OUTFITS, SKIN_TONES } from "@/lib/schema.ts";
 import { Avatar, MOOD_LIST, SKIN, type Mood } from "@/components/Avatar";
 import { PageHeader, useMeta } from "@/components/Layout";
 import { useToast } from "@/components/Toast";

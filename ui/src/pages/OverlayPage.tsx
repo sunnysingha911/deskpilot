@@ -13,7 +13,7 @@ import { api, get, presenceUrl } from "@/lib/api";
 import { playDust } from "@/lib/dust";
 import type { ArsenalDecision, ArsenalSaid, ArsenalVoiceStatus, PresenceAvatar, PresenceState, Priority, RunDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { looksLikeQuestion } from "../../../src/arsenal/intent.ts";
+import { looksLikeQuestion } from "@/lib/intent.ts";
 
 /** Push-to-talk events from the native host (on-device speech recognition). */
 type VoiceEvent = { n: number } & ({ type: "listening" } | { type: "partial"; text: string } | { type: "final"; text: string } | { type: "error"; message: string } | { type: "idle" });

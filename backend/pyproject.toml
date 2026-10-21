@@ -1,0 +1,88 @@
+[project]
+name = "deskpilot"
+version = "0.1.0"
+description = "deskpilot backend: API, agent loop, safety core and A.R.S.E.N.A.L (Python port)"
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.17",
+    "anthropic>=1.0",
+    "asyncpg>=0.30",
+    "cryptography>=46",
+    "fastapi>=0.120",
+    "httpx>=0.28",
+    "keyring>=25.6",
+    "pydantic>=2.12",
+    "pydantic-settings>=2.11",
+    "pypdf>=6.0",
+    "rfc8785>=0.1.4",
+    "sqlalchemy[asyncio]>=2.0.44",
+    "typer>=0.20",
+    "uvicorn[standard]>=0.38",
+]
+
+[project.scripts]
+deskpilot = "deskpilot.cli:app"
+
+[project.optional-dependencies]
+runner = [
+    "espeakng-loader>=0.2.4",
+    "numpy>=2.3",
+    "onnxruntime>=1.31",
+    "playwright>=1.55",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.407",
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 140
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "ASYNC", "S", "PT", "RET", "PTH"]
+ignore = ["S101"]  # assert is fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "E501", "ASYNC110"]  # long SQL fixtures; polling waits
+"migrations/**" = ["N999"]
+# Word lists kept as one string, like the TypeScript source they match.
+"src/deskpilot/arsenal/text.py" = ["SIM905"]
+# Prompt text sent to models: wrapping it would change what the model reads.
+"src/deskpilot/agent/prompt.py" = ["E501"]
+"src/deskpilot/agent/delegate.py" = ["E501"]
+"src/deskpilot/arsenal/voice.py" = ["E501"]
+# IPA phonemes and full-width punctuation, exactly as kokoro-js handles them.
+"src/deskpilot/arsenal/kokoro.py" = ["RUF001"]
+"tests/unit/test_arsenal_desk.py" = ["E501", "RUF001"]
+# Terminal output formatting (the same symbols as the TypeScript CLI).
+"src/deskpilot/agent/cli.py" = ["E501", "RUF001"]
+"src/deskpilot/devtools.py" = ["E501", "RUF001"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+markers = [
+  "integration: needs Postgres (DESKPILOT_TEST_DATABASE_URL)",
+  "contract: talks to a running backend over HTTP (DESKPILOT_CONTRACT_URL)",
+]
+addopts = "-ra --strict-markers"

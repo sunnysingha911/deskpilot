@@ -2,25 +2,25 @@
   "name": "deskpilot",
   "version": "0.0.1",
   "private": true,
-  "description": "Text-first AI agents that operate your computer: tool layer, safety gate, and multi-provider agent loop",
+  "description": "deskpilot's web app (React + Vite). The backend is Python: see backend/.",
   "type": "module",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "frontmost": "tsx scripts/frontmost-app.ts",
-    "tool": "tsx scripts/tool.ts",
-    "logs": "tsx scripts/logs.ts",
-    "tokens": "tsx scripts/tokens.ts",
-    "build:native": "swift build -c release --package-path native/axhelper && swift build -c release --package-path native/overlay",
-    "test": "tsx --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p ui/tsconfig.json",
-    "notes-demo": "tsx scripts/notes-demo.ts",
-    "input-demo": "tsx scripts/input-demo.ts",
-    "agent": "tsx scripts/agent.ts",
-    "gui": "npm run -s build:ui && tsx scripts/gui.ts",
     "build:ui": "vite build --config ui/vite.config.ts",
-    "dev:ui": "tsx scripts/dev-ui.ts"
+    "dev:ui": "uv run --project backend deskpilot dev-ui",
+    "typecheck": "tsc --noEmit -p ui/tsconfig.json",
+    "build:native": "swift build -c release --package-path native/axhelper && swift build -c release --package-path native/overlay",
+    "gui": "npm run -s build:ui && uv run --project backend deskpilot gui",
+    "agent": "uv run --project backend deskpilot agent",
+    "tool": "uv run --project backend deskpilot tool",
+    "logs": "uv run --project backend deskpilot logs",
+    "tokens": "uv run --project backend deskpilot tokens",
+    "frontmost": "uv run --project backend deskpilot frontmost",
+    "notes-demo": "uv run --project backend deskpilot notes-demo",
+    "input-demo": "uv run --project backend deskpilot input-demo",
+    "test": "cd backend && uv run pytest"
   },
   "devDependencies": {
     "@radix-ui/react-checkbox": "^1.4.1",
@@ -42,14 +42,8 @@
     "react-router": "^8.4.0",
     "tailwind-merge": "^3.7.0",
     "tailwindcss": "^4.3.3",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.3.4"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.135.0",
-    "kokoro-js": "1.2.0",
-    "playwright-core": "^1.64.1",
+    "vite": "^8.3.4",
     "zod": "^4.6.7"
   }
 }

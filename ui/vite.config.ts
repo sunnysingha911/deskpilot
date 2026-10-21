@@ -18,7 +18,6 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     host: "127.0.0.1",
-    fs: { allow: [fileURLToPath(new URL("..", import.meta.url))] }, // shared schema in ../src
     proxy: {
       "/api": {
         target: CORE,

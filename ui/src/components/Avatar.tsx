@@ -2,7 +2,7 @@
 // overlay and the control panel share one look. Original designs; colours are SVG attributes (allowed by
 // the page's strict CSP); animations live in index.css.
 import { useId, type ReactNode, type Ref } from "react";
-import type { AvatarLook } from "../../../src/agent/schema.ts";
+import type { AvatarLook } from "@/lib/schema.ts";
 import { cn } from "@/lib/utils";
 
 export type Mood = "idle" | "thinking" | "working" | "talking" | "waiting" | "worried" | "asking" | "sad" | "happy" | "frustrated" | "waving";

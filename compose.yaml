@@ -1,0 +1,56 @@
+# deskpilot control plane: the API and its database. Run: docker compose up -d
+# Everything is published on 127.0.0.1 only (not reachable from your network).
+# Desktop actions run in the native desktop runner on the host (uv run deskpilot runner, Phase 1).
+name: deskpilot
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: deskpilot
+      POSTGRES_DB: deskpilot
+      POSTGRES_PASSWORD: ${DESKPILOT_DB_PASSWORD:?set DESKPILOT_DB_PASSWORD in .env (see .env.example)}
+    ports:
+      - "127.0.0.1:${DESKPILOT_DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deskpilot -d deskpilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Provider keys and DESKPILOT_UI_TOKEN come from .env (never baked into the image).
+    env_file: .env
+    environment:
+      DESKPILOT_ENV: ${DESKPILOT_ENV:-dev}
+      DESKPILOT_DATABASE_URL: postgresql+asyncpg://deskpilot:${DESKPILOT_DB_PASSWORD}@postgres:5432/deskpilot
+      # Ollama and the voice models stay on the host (Apple GPU).
+      DESKPILOT_OLLAMA_URL: http://host.docker.internal:11434
+      # The control plane's signing key lives here (runners pin it at pairing: keep this volume).
+      DESKPILOT_DATA_DIR: /app/data
+      # Keys entered in the web app are stored in the data volume (write-only from the API).
+      DESKPILOT_SECRETS_FILE: /app/data/secrets.env
+      DESKPILOT_AGENTS_DIR: /app/agents
+      DESKPILOT_UI_DIST: /app/ui-dist
+      DESKPILOT_PUBLIC_PORT: ${DESKPILOT_API_PORT:-8800}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${DESKPILOT_API_PORT:-8800}:8800"
+    volumes:
+      - cpdata:/app/data
+      # Agent definitions stay plain files in the repo (agents are data); the built web app (npm run build:ui builds ui/dist).
+      - ./agents:/app/agents
+      - ./ui/dist:/app/ui-dist:ro
+
+volumes:
+  pgdata:
+  cpdata:

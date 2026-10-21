@@ -3,7 +3,7 @@
 This project never changes system or security settings itself. You grant each permission by hand.
 Paths below are for macOS 26/27 (System Settings). Each permission is granted to the
 **app that launches the process**, which is your terminal app (Terminal, iTerm2, Ghostty, VS Code,
-…), not to `node`. If you switch terminals, grant again for the new one.
+…), not to `python`. If you switch terminals, grant again for the new one.
 
 After granting any of these, **quit and relaunch the terminal app** (⌘Q). macOS caches the
 decision per process.
@@ -22,7 +22,7 @@ Lets the terminal send AppleScript commands to other apps (System Events, Notes,
   prompts again).
 - **Check:**
   ```sh
-  npm run frontmost      # → {"ok":true,"frontmostApp":"..."}
+  uv run --project backend deskpilot frontmost      # → {"ok": true, "frontmostApp": "..."}
   osascript -e 'tell application "Notes" to get name of every folder'
   ```
   Error `-1743` ("Not authorized to send Apple events") means the permission is missing.
@@ -43,7 +43,7 @@ Lets a process read other apps' UI trees (AXUIElement) and post synthetic keyboa
   parent needs the grant instead.
 - **Check (after Phase 1 builds the helper):**
   ```sh
-  npm run tool -- ui.check_access    # → "output": {"trusted": true}
+  uv run --project backend deskpilot tool ui.check_access    # → "output": {"trusted": true}
   ```
   Without the grant, AX calls return `kAXErrorAPIDisabled` / `trusted:false`, and synthetic key
   events are silently dropped.
@@ -55,7 +55,7 @@ menu bar.
 - **Path:** System Settings → **Privacy & Security** → **Screen & System Audio Recording**
   → under *Screen & System Audio Recording*, click **+** → add your terminal app → toggle **on**.
 - macOS shows a periodic reminder that the app can record your screen. That's expected.
-- **Check (Phase 1+):** `npm run screenshot` and open the PNG in `scratch/`. If it shows real windows, the permission is working.
+- **Check (Phase 1+):** `uv run --project backend deskpilot tool screenshot '{}'` and open the PNG it names. If it shows real windows, the permission is working.
 
 ## 4. Playwright browser: no OS permission needed
 Playwright drives its own bundled Chromium, so no Automation or Accessibility grant is needed. The
@@ -78,7 +78,7 @@ button, and turns speech into text **on this Mac** (it refuses rather than use A
 - **On-device language:** if the orb says on-device recognition isn't available for your language,
   pick another one under A.R.S.E.N.A.L → Push to talk → Language (English India/US work on this Mac).
 - While it listens, macOS shows the orange microphone dot in the menu bar.
-- **Check:** `npm run gui`, turn on Push to talk, hold the key and say "how did my last task go?".
+- **Check:** `npm run gui` (or `deskpilot runner start` with the Docker setup), turn on Push to talk, hold the key and say "how did my last task go?".
 
 Speaking answers aloud uses the built-in `say` command and needs no permission.
 
